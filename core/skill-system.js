@@ -151,8 +151,8 @@ export class SkillSystem {
     return Math.round(ratePerDay * days);
   }
 
-  /** 检索：供 L6 上下文装配 */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K) {
+  /** 检索：供 L6 上下文装配（权重可调参，默认 §3.4-4） */
+  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
     const actives = this.active().filter((s) => s.heat !== 'cold');
     if (!actives.length) return [];
     const idx = new BM25Index(actives.map((s) => ({ id: s.id, text: `${s.name} ${s.scenario} ${s.description}` })));
@@ -161,7 +161,7 @@ export class SkillSystem {
     return hits.map((h) => {
       const row = actives.find((s) => s.id === h.id);
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
-      return { row, score: 0.6 * h.score + 0.25 * row.quality_score + 0.15 * (Number.isFinite(rec) ? rec : 0) };
+      return { row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * (Number.isFinite(rec) ? rec : 0) };
     }).filter((x) => x.score > 0.1);
   }
 }

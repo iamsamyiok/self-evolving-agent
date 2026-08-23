@@ -21,6 +21,9 @@ export const BOUNDS = {
   SKILL_PROMOTE_W: [0.50, 0.60, 0.70],
   SKILL_DEMOTE_W: [0.35, 0.45, 0.55],
   SKILL_PURGE_W: [0.15, 0.25, 0.35],
+  W_SIM: [0.3, 0.6, 0.8],   // 检索分权重（自动调参可动，步长 ≤10%）
+  W_QUALITY: [0.1, 0.25, 0.5],
+  W_RECENCY: [0.05, 0.15, 0.35],
 };
 
 export const CONFIG = {
@@ -32,8 +35,14 @@ export const CONFIG = {
   LLM_MAX_RETRIES: 4,
   LLM_CONCURRENCY: 4,
 
+  // ── Embedding（三级降级 §4.1.3：none=BM25 | openai-compatible=向量）──
+  EMBEDDING_PROVIDER: env.SPA_EMBED_PROVIDER ?? local.EMBEDDING_PROVIDER ?? 'none',
+  EMBEDDING_BASE_URL: env.SPA_EMBED_BASE_URL ?? local.EMBEDDING_BASE_URL ?? '',
+  EMBEDDING_MODEL: env.SPA_EMBED_MODEL ?? local.EMBEDDING_MODEL ?? '',
+  EMBEDDING_DIM: 0, // >0 时启用维度守护（切换需全量重算+快照）
+
   // ── 运行模式 ──
-  MOCK: (env.SPA_MOCK ?? local.MOCK ?? '0') === '1', // 离线演示/测试：LLM 返回确定性假响应
+  MOCK: (env.SPA_MOCK ?? local.MOCK ?? '0') === '1',
   DATA_DIR: env.SPA_DATA_DIR ?? local.DATA_DIR ?? join(ROOT, 'data'),
   ROOT,
 
@@ -45,35 +54,65 @@ export const CONFIG = {
   SKILL_PROMOTE_W: BOUNDS.SKILL_PROMOTE_W[1],
   SKILL_DEMOTE_W: BOUNDS.SKILL_DEMOTE_W[1],
   SKILL_PURGE_W: BOUNDS.SKILL_PURGE_W[1],
-  MEMORY_KEEP_LINE: 0.30,      // 长期记忆重要度留存线（I 值低于此进入净化候选）
-  MIN_EVIDENCE_N: 5,           // 最小证据次数（n<5 禁止一切淘汰类净化）
-  IMMUNITY_HOURS: 48,          // 新生免疫期
-  QUARANTINE_TTL_DAYS: 30,     // 隔离区保留天数
-  SKILL_ZOMBIE_DAYS: 30,       // 冷层僵尸判定
+  MEMORY_KEEP_LINE: 0.30,
+  MIN_EVIDENCE_N: 5,
+  IMMUNITY_HOURS: 48,
+  QUARANTINE_TTL_DAYS: 30,
+  SKILL_ZOMBIE_DAYS: 30,
+  SKILL_FROZEN_OBSERVE_DAYS: 7,   // FROZEN 观察期（§6.2.3）
 
   // ── 自净化节奏 ──
-  PURIFY_LIGHT_INTERVAL_MIN: 10, // 轻量净化间隔（±20% 抖动）
-  PURIFY_CHURN_LIMIT: 0.05,      // 单周期变更率上限（活性实体 5%）
-  PURIFY_DAILY_CHURN_LIMIT: 0.20,// 单日累计变更率上限
-  PURIFY_JUDGE_CALL_CAP: 10,     // 单周期判定器 LLM 调用上限（成本护栏·轻量版）
+  PURIFY_LIGHT_INTERVAL_MIN: 10,
+  PURIFY_CHURN_LIMIT: 0.05,
+  PURIFY_DAILY_CHURN_LIMIT: 0.20,
+  PURIFY_JUDGE_CALL_CAP: 10,
 
   // ── 记忆/经验净化细则阈值 ──
-  MEMORY_DUP_JACCARD: 0.85,      // 冗余候选：同层 Jaccard ≥ 此值
-  EXPERIENCE_STALE_DAYS: 90,     // 经验失效：零命中天数
-  SKILL_DUP_JACCARD: 0.90,       // 技能冗余（第二阶段启用合并，MVP 仅检测）
+  MEMORY_DUP_JACCARD: 0.85,
+  EXPERIENCE_STALE_DAYS: 90,
+  SKILL_DUP_JACCARD: 0.90,
 
-  // ── 成本护栏（轻量版：仅日预算）──
+  // ── 成本护栏（三层预算 §8.3，禁止自动调参放宽）──
   DAILY_TOKEN_BUDGET: 2_000_000,
+  TASK_TOKEN_BUDGET: 50_000,
+  PURIFY_CYCLE_TOKEN_BUDGET: 30_000,
+
+  // ── 复审抽样（⑥ REVIEW §6.1）──
+  REVIEW_SAMPLE_RATIO: 0.10,
+
+  // ── 反振荡（§6.5）──
+  ADVERSARIAL_FREEZE: 3,          // 血缘链生成-被净化 ≥3 次 → 冻结整链
+  NET_RATE_ROLLBACK_LINE: -0.10,  // 净利率连续 3 周期 < -10% → 快照回滚
+  NET_RATE_INSTABILITY: 0.20,     // 连续 3 周期 |nr|>20% → 失稳事件
+
+  // ── 回归门禁（§10.1）──
+  GOLDEN_REGRESSION_PP: 2,        // 成功率回归 ≤2pp 才可生效
+
+  // ── 工具沙箱（§8.2/§9.2）──
+  TOOLS_ENABLED: (env.SPA_TOOLS ?? local.TOOLS_ENABLED ?? '1') === '1',
+  TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? join(ROOT, 'data', 'workspace'),
+  TOOL_TIMEOUT_MS: 15_000,
+  TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? '0') === '1', // 默认禁用命令行工具
+  TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn']),
 
   // ── 任务执行 ──
   PLAN_RETRY_MAX: 2,
   STEP_RETRY_MAX: 3,
 
   // ── 黄金集冷启动 ──
-  GOLDEN_AUTO_MAX: 50,           // 前 N 个判定成功的任务自动沉淀为黄金集（§5.1.5）
+  GOLDEN_AUTO_MAX: 50,
 
   // ── 快照保留 ──
   SNAPSHOT_KEEP: 30,
+
+  // ── 服务/面板/集群 ──
+  DASHBOARD_PORT: Number(env.SPA_DASHBOARD_PORT ?? local.DASHBOARD_PORT ?? 3790),
+  SERVE_PORT: Number(env.SPA_SERVE_PORT ?? local.SERVE_PORT ?? 3791),
+
+  // ── 总开关（安全宪法允许的人工显式开关，运行期不可被进化修改）──
+  AUTO_ROLLBACK: true,
+  AUTO_PURIFY: true,
+  AUTO_TUNE: true,
 };
 
 /** 校验阈值是否在界内（自动调参与人工修改共用此守卫） */

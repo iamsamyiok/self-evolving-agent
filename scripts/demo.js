@@ -31,9 +31,9 @@ export async function runDemo({ store, executor, purify }) {
   store.insert('experience', { id: uuid7(), state: 'ACTIVE', version: 1, parent_id: null, origin: 'migrate', created_at: now - 86_400_000, updated_at: now - 86_400_000, immunity_until: now - 86_400_000, execution_count: 0, quality_score: 0.5, embedding: null, quarantined_at: null, purge_after: null, last_used_at: now - 91 * 86_400_000, task_signature: 'DEMO 失效经验：旧部署流程', summary: '旧部署流程', rules: '{bad json', pitfalls: '[]', failure_taxonomy: null, evidence: '[]', sample_count: 1, success_count: 0, fail_count: 0 });
   console.log('已注入：过期 short 记忆 1、冗余 long 对 1 组（2 条）、失效+坏行经验 1（规则字段损坏）');
 
-  line('4. 净化周期（检测→复核→隔离→留痕）');
+  line('4. 净化周期（检测→复核→隔离→合并→留痕，深度含技能/复审/对抗检查）');
   const report = await purify.runCycle({ deep: true });
-  console.log(JSON.stringify({ epoch: report.epoch, detected: report.detected, quarantined: report.quarantined, skipped: report.skipped, snapshot: report.snapshot?.id, netRate: report.netRate }, null, 2));
+  console.log(JSON.stringify({ epoch: report.epoch, detected: report.detected, quarantined: report.quarantined, merged: report.merged, skipped: report.skipped?.slice(0, 3), review: report.review, netRate: report.netRate, snapshot: report.snapshot?.id }, null, 2));
 
   line('5. 回滚演示（隔离区一键恢复）');
   const q = store.list('memory', "WHERE state = 'QUARANTINED'");
@@ -41,6 +41,14 @@ export async function runDemo({ store, executor, purify }) {
     const r = await purify.restore(q[0].id);
     console.log(`恢复 ${q[0].id.slice(0, 18)}… →`, JSON.stringify(r));
   } else console.log('（本轮无隔离实体）');
+
+  line('5.5 工具沙箱演示（声明式注册表 + 红线拦截）');
+  const { ToolRuntime } = await import('../core/tool-runtime.js');
+  const tools = new ToolRuntime();
+  const w = await tools.call('fs_write', { path: 'demo/hello.txt', content: '沙箱内写入', use_reason: '演示沙箱写入' });
+  console.log('✓ 沙箱内写入:', w.output);
+  try { await tools.call('fs_write', { path: '../../escape.txt', content: 'x', use_reason: '越界尝试' }); } catch (e) { console.log('✓ 越界拦截:', e.message); }
+  try { await tools.call('http_get', { url: 'https://evil.example.com' }); } catch (e) { console.log('✓ 白名单拦截:', e.message); }
 
   line('6. 终态统计');
   console.log(JSON.stringify(store.stats(), null, 2));

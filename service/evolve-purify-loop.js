@@ -15,8 +15,11 @@ export class EvolvePurifyLoop {
     this.running = false;          // 是否有任务在执行
     this.purifyTimer = null;
     this.backoffFactor = 1;        // 背压：任务队列深 → 净化间隔拉长
-    this.stats = { tasks: 0, evolveBatches: 0, purifyCycles: 0, lastPurifyReport: null };
+    this.stats = { tasks: 0, evolveBatches: 0, purifyCycles: 0, deepCycles: 0, lastPurifyReport: null };
     this.onIdle = null;
+    this.onDeepCycle = null;   // 深度净化后钩子（自动调参/策略净化，由 app.js 注入）
+    this.onRiskRollback = null; // 风险净化回滚钩子
+    this.deepTimer = null;
   }
 
   start() {
@@ -29,7 +32,7 @@ export class EvolvePurifyLoop {
           // 空闲窗口优先净化；忙时降频一半（背压，§6.4）
           if (!idle) this.backoffFactor = Math.min(4, this.backoffFactor * 2);
           else this.backoffFactor = 1;
-          if (this.taskQueue.length > 500) { /* >500 仅保留风险净化：MVP 无风险净化维度，跳过 */ }
+          if (this.taskQueue.length > 500) { /* >500 仅保留风险净化：MVP 风险净化随周期走，跳过 */ }
           else {
             const report = await runExclusive('purify-cycle', () => this.purify.runCycle({ deep: false }));
             this.stats.purifyCycles++;
@@ -44,12 +47,44 @@ export class EvolvePurifyLoop {
       this.purifyTimer.unref?.();
     };
     schedule();
+
+    // 深度净化：每日 1 次（PURIFY_DEEP_CRON 低峰时段近似为启动后每 24h，§6.4）
+    const deepTick = async () => {
+      try {
+        const report = await runExclusive('purify-cycle', () => this.purify.runCycle({ deep: true }));
+        this.stats.deepCycles++;
+        console.log(`\n[深度净化] epoch ${report.epoch}：候选 ${report.detected.length}，隔离 ${report.quarantined?.length ?? 0}，合并 ${report.merged?.length ?? 0}，修复 ${report.repaired?.length ?? 0}，复审翻案 ${report.review?.overturned?.length ?? 0}`);
+        await this.onDeepCycle?.(report);
+        await this.onRiskRollback?.(report.risk);
+      } catch (e) {
+        this.control.event('deep_purify_error', { error: String(e?.message ?? e) });
+      }
+    };
+    const d = new Date(); d.setHours(3, 0, 0, 0); if (d < new Date()) d.setDate(d.getDate() + 1);
+    const firstDelay = d - Date.now();
+    this.deepTimer = setTimeout(function loopDeep() {
+      deepTick();
+      this.deepTimer = setTimeout(loopDeep.bind(this), 24 * 3600_000);
+      this.deepTimer.unref?.();
+    }.bind(this), Math.min(firstDelay, 30_000)); // 首次：启动 30s 内先跑一轮（演示/验收友好），之后每 24h
+    this.deepTimer.unref?.();
+
     this.control.startHeartbeat();
   }
 
   stop() {
     if (this.purifyTimer) clearTimeout(this.purifyTimer);
+    if (this.deepTimer) clearTimeout(this.deepTimer);
     this.control.stopHeartbeat();
+  }
+
+  /** 手动触发深度净化（TUI/面板用） */
+  async deepPurifyNow() {
+    const report = await runExclusive('purify-cycle', () => this.purify.runCycle({ deep: true }));
+    this.stats.deepCycles++;
+    await this.onDeepCycle?.(report);
+    await this.onRiskRollback?.(report.risk);
+    return report;
   }
 
   /** 提交任务（P0：任务永远优先） */

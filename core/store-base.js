@@ -78,6 +78,24 @@ export class Store {
     if (!row || row.v == null) {
       this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)').run(Date.now());
     }
+    this.migrateV2();
+  }
+
+  /** v2：增量列（幂等，SQLite 无 IF NOT EXISTS 的 ADD COLUMN 用 pragma 守卫） */
+  migrateV2() {
+    const applied = this.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v ?? 1;
+    if (applied >= 2) return;
+    const cols = (table) => this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols('skills').includes('frozen_at')) {
+      this.db.exec('ALTER TABLE skills ADD COLUMN frozen_at INTEGER');
+    }
+    if (!cols('memories').includes('frozen_at')) {
+      this.db.exec('ALTER TABLE memories ADD COLUMN frozen_at INTEGER');
+    }
+    if (!cols('experiences').includes('frozen_at')) {
+      this.db.exec('ALTER TABLE experiences ADD COLUMN frozen_at INTEGER');
+    }
+    this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)').run(Date.now());
   }
 
   close() { this.db.close(); }
@@ -215,6 +233,35 @@ export class Store {
     const path = join(this.dataDir, 'lost_and_found', name);
     writeFileSync(path, JSON.stringify({ problem, row }, null, 2));
     return name;
+  }
+
+  // ── Prompt 注册表（策略净化）──
+  activePrompt(role) {
+    return this.db.prepare("SELECT * FROM prompt_registry WHERE role = ? AND status = 'active' ORDER BY version DESC LIMIT 1").get(role);
+  }
+  shadowPrompt(role) {
+    return this.db.prepare("SELECT * FROM prompt_registry WHERE role = ? AND status = 'shadow' ORDER BY version DESC LIMIT 1").get(role);
+  }
+  insertPrompt({ id, role, version, content, sha256, status = 'shadow' }) {
+    this.db.prepare('INSERT INTO prompt_registry (id, role, version, content, sha256, status, created_at, activated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, role, version, content, sha256, status, Date.now(), status === 'active' ? Date.now() : null);
+  }
+  setPromptStatus(id, status) {
+    this.db.prepare('UPDATE prompt_registry SET status = ?, activated_at = CASE WHEN ? = \'active\' THEN ? ELSE activated_at END WHERE id = ?').run(status, status, Date.now(), id);
+  }
+  prompts(role = null) {
+    return role
+      ? this.db.prepare('SELECT * FROM prompt_registry WHERE role = ? ORDER BY version DESC').all(role)
+      : this.db.prepare('SELECT * FROM prompt_registry ORDER BY role, version DESC').all();
+  }
+
+  // ── 调参留痕（§8.3.1：每步变更可审计可回退）──
+  logTune({ keyName, oldValue, newValue, reason, goldenGate = 0 }) {
+    this.db.prepare('INSERT INTO tune_logs (id, key_name, old_value, new_value, reason, golden_gate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(uuid7(), keyName, JSON.stringify(oldValue), JSON.stringify(newValue), reason, goldenGate ? 1 : 0, Date.now());
+  }
+  tuneLogs(limit = 30) {
+    return this.db.prepare('SELECT * FROM tune_logs ORDER BY created_at DESC LIMIT ?').all(limit);
   }
 
   // ── 统计 ──

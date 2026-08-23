@@ -154,3 +154,27 @@ CREATE TABLE IF NOT EXISTS system_state (
   value         TEXT NOT NULL,            -- JSON
   updated_at    INTEGER NOT NULL
 );
+
+-- ───────── Prompt 版本注册表（策略净化 §6.2.5：版本化+双轨+自动回退） ─────────
+CREATE TABLE IF NOT EXISTS prompt_registry (
+  id            TEXT PRIMARY KEY,
+  role          TEXT NOT NULL,            -- planner | step | final | extract_mem | retrospect | distill
+  version       INTEGER NOT NULL,
+  content       TEXT NOT NULL,
+  sha256        TEXT NOT NULL,
+  status        TEXT NOT NULL,            -- active | shadow | retired
+  created_at    INTEGER NOT NULL,
+  activated_at  INTEGER,
+  UNIQUE(role, version)
+);
+
+-- ───────── 调参留痕（自动调参每步变更可审计可回退，§8.3.1） ─────────
+CREATE TABLE IF NOT EXISTS tune_logs (
+  id            TEXT PRIMARY KEY,
+  key_name      TEXT NOT NULL,
+  old_value     TEXT NOT NULL,
+  new_value     TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  golden_gate  INTEGER NOT NULL DEFAULT 0,-- 是否过黄金门禁
+  created_at    INTEGER NOT NULL
+);

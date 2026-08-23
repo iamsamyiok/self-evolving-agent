@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>self-purify-agent 面板</title>
+<style>
+  body{font-family:system-ui,'Segoe UI',sans-serif;background:#0f1419;color:#d8dee6;margin:0;padding:20px}
+  h1{font-size:18px}h1 small{color:#7f8c98;font-weight:400}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:14px}
+  .card{background:#161b22;border:1px solid #232a33;border-radius:8px;padding:12px 14px}
+  .card h3{margin:0 0 8px;font-size:13px;color:#8ab4ff}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td,th{padding:3px 6px;text-align:left;border-bottom:1px solid #20262e}
+  .bar{height:8px;background:#21262d;border-radius:4px;overflow:hidden;margin:3px 0}
+  .bar i{display:block;height:100%;background:#3fb950}
+  .ok{color:#3fb950}.bad{color:#f85149}.warn{color:#d29922}
+  #events{font-size:11px;color:#8b949e;max-height:140px;overflow:auto}
+  input,button{background:#21262d;color:#d8dee6;border:1px solid #30363d;border-radius:6px;padding:6px 10px}
+  button{cursor:pointer}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:40px}
+  .spark i{flex:1;background:#388bfd;min-height:2px}
+</style></head><body>
+<h1>self-purify-agent <small>进化/净化可视化面板（只读）</small></h1>
+<div class="card" style="margin-top:10px">
+  <h3>提交任务（走正常调度：任务P0 → 进化P1 → 净化P2）</h3>
+  <input id="task" style="width:70%" placeholder="输入任务…"><button onclick="submitTask()">执行</button>
+  <span id="taskResult" style="font-size:12px;margin-left:8px"></span>
+</div>
+<div class="grid" id="metrics"></div>
+<div class="card"><h3>净化事件流（SSE 实时）</h3><div id="events"></div></div>
+<script>
+let M=null;
+async function refresh(){
+  try{ M=await (await fetch('/api/metrics')).json(); }catch{return}
+  const m=M; const pct=(a,b)=>b?Math.round(a/b*100):0;
+  const rows=['skill','memory','experience'].map(t=>{
+    const s=m.stats[t]||{};
+    return '<tr><td>'+t+'</td><td>'+(s.ACTIVE??0)+'</td><td class="warn">'+(s.QUARANTINED??0)+'</td><td>'+(s.total??0)+'</td></tr>';
+  }).join('');
+  const funnel=Object.entries(m.purgeFunnel||{}).map(([k,v])=>'<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('');
+  const sparks=(m.netRateHistory||[]).slice(-20).map(v=>{
+    const h=Math.min(40,Math.abs(v)*100+3);
+    const c=v<-0.1?'#f85149':(v>0.1?'#d29922':'#3fb950');
+    return '<i style="height:'+h+'px;background:'+c+'"></i>';
+  }).join('')||'<span style="color:#7f8c98">暂无数据</span>';
+  const prompts=(m.prompts||[]).map(p=>'<tr><td>'+p.role+'</td><td>v'+p.version+'</td><td class="'+(p.status==='active'?'ok':'')+'">'+p.status+'</td><td>'+p.sha+'…</td></tr>').join('');
+  const purges=(m.recentPurges||[]).slice(0,8).map(l=>'<tr><td>'+new Date(l.at).toLocaleTimeString()+'</td><td>'+l.action+'</td><td>'+l.entity+'</td><td>'+String(l.reason).slice(0,36)+'</td></tr>').join('');
+  const overturnRate=m.review.overturnRate;
+  const overturnClass=(overturnRate??0)>0.05?'bad':'ok';
+  const usagePct=pct(((m.usage?.today?.in??0)+(m.usage?.today?.out??0)),m.usage?.budget);
+  document.getElementById('metrics').innerHTML=
+  '<div class="card"><h3>实体总量</h3><table><tr><th>类型</th><th>活跃</th><th>隔离</th><th>总计</th></tr>'+rows+'</table></div>'
+  +'<div class="card"><h3>任务</h3><table><tr><td>成功</td><td class="ok">'+(m.taskSuccess.SUCCESS??0)+'</td><td>失败</td><td class="bad">'+(m.taskSuccess.FAIL??0)+'</td></tr></table>'
+  +'<div style="margin-top:6px">黄金集 '+m.golden+' 条 · 墓碑 '+m.tombstones+' 个</div></div>'
+  +'<div class="card"><h3>净化漏斗（累计）</h3><table>'+funnel
+  +'<tr><td>复审翻案率</td><td class="'+overturnClass+'">'+(overturnRate??'—')+'（'+m.review.sampled+' 样本）</td></tr></table></div>'
+  +'<div class="card"><h3>净利率（稳态 ∈ [-10%, +10%]）</h3><div class="spark">'+sparks+'</div>'
+  +'<div style="font-size:11px;color:#7f8c98;margin-top:4px">最新：'+((m.netRateHistory||[]).slice(-1)[0]??'—')+'</div></div>'
+  +'<div class="card"><h3>成本（日预算 '+(m.usage?.budget?.toLocaleString()??'—')+'）</h3>'
+  +'<div class="bar"><i style="width:'+usagePct+'%"></i></div>'
+  +'<div style="font-size:11px">in '+(m.usage?.today?.in??0).toLocaleString()+' · out '+(m.usage?.today?.out??0).toLocaleString()+' · 调用 '+(m.usage?.today?.calls??0)+' · 错误 '+(m.usage?.today?.errors??0)+'</div></div>'
+  +'<div class="card"><h3>技能质量分布（活跃）</h3><table>'
+  +'<tr><td>Q≥0.6 优质</td><td class="ok">'+((m.qDist.skill||[]).filter(q=>q>=0.6).length)+'</td></tr>'
+  +'<tr><td>Q≤0.25 劣质</td><td class="bad">'+((m.qDist.skill||[]).filter(q=>q<=0.25).length)+'</td></tr></table>'
+  +'<div style="margin-top:4px;font-size:11px;color:#7f8c98">检索权重（自动调参）：'+(m.tuned?JSON.stringify(m.tuned):'默认')+'</div></div>'
+  +'<div class="card"><h3>Prompt 版本（双轨）</h3><table>'+prompts+'</table></div>'
+  +'<div class="card"><h3>最近净化留痕</h3><table>'+purges+'</table></div>';
+}
+async function submitTask(){
+  const input=document.getElementById('task').value.trim(); if(!input)return;
+  document.getElementById('taskResult').textContent='执行中…';
+  try{
+    const r=await(await fetch('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input})})).json();
+    document.getElementById('taskResult').innerHTML=r.outcome==='SUCCESS'
+      ?'<span class="ok">✅ '+String(r.answer||'').slice(0,80)+'</span>'
+      :'<span class="bad">❌ '+(r.error||String(r.answer||'').slice(0,60)||'失败')+'</span>';
+  }catch(e){document.getElementById('taskResult').innerHTML='<span class="bad">'+e.message+'</span>'}
+  refresh();
+}
+const es=new EventSource('/api/events');
+es.addEventListener('purge',e=>{
+  const d=JSON.parse(e.data);const el=document.getElementById('events');
+  el.innerHTML='<div>['+new Date().toLocaleTimeString()+'] '+d.action+' '+d.dimension+' '+d.entity+' — '+d.reason+'</div>'+el.innerHTML;
+});
+refresh();setInterval(refresh,5000);
+</script></body></html>

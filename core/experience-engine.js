@@ -86,8 +86,8 @@ export class ExperienceEngine {
     return null;
   }
 
-  /** 检索：0.6·相似度 + 0.4·Q（§5.3） */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K) {
+  /** 检索：w·相似度 + w·Q（§5.3，权重可调参） */
+  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.4 }) {
     const actives = this.active();
     if (!actives.length) return [];
     const idx = new BM25Index(actives.map((e) => ({ id: e.id, text: `${e.task_signature} ${e.summary}` })));
@@ -95,7 +95,7 @@ export class ExperienceEngine {
     const now = Date.now();
     const out = hits.map((h) => {
       const row = actives.find((e) => e.id === h.id);
-      return { row, score: 0.6 * h.score + 0.4 * row.quality_score };
+      return { row, score: weights.sim * h.score + (weights.quality ?? 0.4) * row.quality_score };
     });
     for (const o of out) this.store.update('experience', o.row.id, { last_used_at: now });
     return out;

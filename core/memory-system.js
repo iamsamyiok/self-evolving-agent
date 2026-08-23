@@ -86,8 +86,8 @@ export class MemorySystem {
     return { row: actives.find((m) => m.id === top.id), sim: top.score };
   }
 
-  /** 检索：score = 0.6·相似度 + 0.25·Q + 0.15·时近性；注入即 access_count+1（§5.2） */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K) {
+  /** 检索：score = w·相似度 + w·Q + w·时近性（权重可调参）；注入即 access_count+1（§5.2） */
+  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
     const superseded = this.supersededIds();
     const actives = this.activeMemories().filter((m) => !superseded.has(m.id) && m.tier !== 'instant');
     if (!actives.length) return [];
@@ -98,7 +98,7 @@ export class MemorySystem {
       const row = actives.find((m) => m.id === h.id);
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
       const recency = Number.isFinite(rec) ? rec : 0;
-      return { row, score: 0.6 * h.score + 0.25 * row.quality_score + 0.15 * recency };
+      return { row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency };
     }).filter((x) => x.score > 0.15); // 低分不注入，防上下文污染
     scored.sort((a, b) => b.score - a.score);
     for (const s of scored.slice(0, topK)) {

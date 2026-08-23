@@ -11,14 +11,20 @@ const HELP = `命令：
   task <任务描述>            执行任务（规划→分步→判定→进化沉淀）
   status                     系统状态（实体计数 / 队列 / 心跳 / 用量）
   skills | memories | experiences   列出实体（状态/Q/关键字段）
-  purify [light|deep]        立即执行净化周期（六步管线 MVP 版）
+  purify [light|deep]        立即净化周期（deep 含技能/策略/风险维度+④合并⑥复审）
+  review [id]                复审抽样（或不带参数抽 10%）
+  tune                       立即自动调参（界内+黄金门禁+留痕）
+  prompts [role]             Prompt 版本双轨查看
+  tools                      工具注册表（沙箱权限）
   restore <实体id>           从隔离区恢复实体
   logs [n=10]                最近 n 条净化留痕
+  tune-logs [n=10]           调参留痕
   golden list|add <任务> --contains <断言>   黄金任务集管理
   snapshot                   手动快照（VACUUM INTO + SHA-256）
-  usage                      token 用量与日预算
+  usage                      token 用量与三层预算
   demo                       MOCK 离线演示（需 SPA_MOCK=1）
-  help | quit`;
+  help | quit
+服务模式：node app.js --serve（HTTP 任务接口 + 面板）· --watchdog（看门狗）· --cluster N（集群）`;
 
 function brief(row, type) {
   if (type === 'skill') return `${row.id.slice(0, 13)}… ${row.state.padEnd(10)} Q=${row.quality_score.toFixed(2)} heat=${row.heat.padEnd(4)} n=${row.execution_count} ${row.name}`;
@@ -54,8 +60,37 @@ async function handle(line) {
     case 'purify': {
       const deep = rest[0] === 'deep';
       console.log('…净化中');
-      const report = await purify.runCycle({ deep });
-      console.log(JSON.stringify({ epoch: report.epoch, detected: report.detected, quarantined: report.quarantined, skipped: report.skipped, netRate: report.netRate, snapshot: report.snapshot?.id ?? null }, null, 2));
+      const report = deep ? await loop.deepPurifyNow() : await purify.runCycle({ deep: false });
+      console.log(JSON.stringify({ epoch: report.epoch, detected: report.detected, quarantined: report.quarantined, merged: report.merged, repaired: report.repaired, skipped: report.skipped, review: report.review, frozen: report.frozen, adversarial: report.adversarial, netRate: report.netRate, snapshot: report.snapshot?.id ?? null }, null, 2));
+      break;
+    }
+    case 'review': {
+      const r = await purify.reviewSampled({ label: 'tui-review', ids: rest[0] ? [rest[0]] : null });
+      console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case 'tune': {
+      const { AutoControl } = await import('./core/auto-control.js');
+      const ctl = new AutoControl(store);
+      const r = await ctl.tune({ executor });
+      console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case 'prompts': {
+      for (const p of store.prompts(rest[0] ?? null)) {
+        console.log(`${p.role.padEnd(12)} v${p.version} [${p.status}] ${p.sha256.slice(0, 10)}… ${p.content.slice(0, 50)}`);
+      }
+      break;
+    }
+    case 'tools': {
+      for (const t of executor.tools.list()) console.log(`${t.risk.padEnd(9)} ${t.name.padEnd(10)} ${t.desc}`);
+      break;
+    }
+    case 'tune-logs': {
+      const n = Number(rest[0]) || 10;
+      for (const t of store.tuneLogs(n)) {
+        console.log(`${new Date(t.created_at).toLocaleTimeString()} ${t.key_name}: ${t.old_value} → ${t.new_value}${t.golden_gate ? '（过门禁）' : ''} — ${t.reason.slice(0, 40)}`);
+      }
       break;
     }
     case 'restore': {
@@ -94,7 +129,9 @@ async function handle(line) {
     }
     case 'usage': {
       const u = getUsage();
-      console.log(`今日 in=${u.tokensIn} out=${u.tokensOut} calls=${u.calls} errors=${u.errors} 预算=${CONFIG.DAILY_TOKEN_BUDGET}`);
+      const { CONFIG } = await import('./config/index.js');
+      console.log(`今日 in=${u.tokensIn} out=${u.tokensOut} calls=${u.calls} errors=${u.errors}`);
+      console.log(`三层预算：日 ${CONFIG.DAILY_TOKEN_BUDGET / 1000}k | 任务 ${CONFIG.TASK_TOKEN_BUDGET / 1000}k | 净化周期 ${CONFIG.PURIFY_CYCLE_TOKEN_BUDGET / 1000}k`);
       break;
     }
     case 'demo': {
