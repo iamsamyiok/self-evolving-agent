@@ -14,6 +14,10 @@ function confine(p, root) {
   if (rel.startsWith('..') || isAbsolute(rel)) {
     return { ok: false, reason: `路径越出沙箱根：${p}` };
   }
+  // Windows 绝对路径（如 C:/Windows/evil.txt）在 Linux 运行时也会绕过检查
+  if (/^[A-Za-z]:[\\\/]/.test(p) || /^[A-Za-z]:\/[^/]/.test(p)) {
+    return { ok: false, reason: `路径越出沙箱根：${p}` };
+  }
   return { ok: true, abs };
 }
 

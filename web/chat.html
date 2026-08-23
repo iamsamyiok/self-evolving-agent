@@ -7,8 +7,9 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--txt);height:100vh;overflow:hidden}
 #app{display:flex;height:100vh}
-/* ── 侧栏 ── */
-aside.side{width:264px;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+/* ── 侧栏（支持折叠）── */
+aside.side{width:264px;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0;transition:width .2s,opacity .2s;overflow:hidden}
+aside.side.collapsed{width:0;border-right:none;opacity:0;pointer-events:none}
 .brand{padding:16px 16px 10px;font-weight:700;font-size:15px}
 .brand small{display:block;color:var(--dim);font-weight:400;font-size:11px;margin-top:3px}
 .newchat{margin:8px 12px;padding:9px;border-radius:8px;border:1px solid var(--line);background:var(--acc);color:#fff;font-size:13px;cursor:pointer}
@@ -88,20 +89,24 @@ aside.evo h3:first-child{margin-top:0}
 .cfgbtns button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 #cfgTestRes{font-size:12px;margin-top:10px;min-height:16px}
 #cfgTestRes.ok{color:var(--ok)}#cfgTestRes.bad{color:var(--bad)}
+/* 折叠侧栏按钮 */
+#sidebarToggle{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:10;background:var(--chip);border:1px solid var(--line);border-left:none;border-radius:0 8px 8px 0;color:var(--dim);padding:10px 5px;cursor:pointer;font-size:14px;transition:background .15s}
+#sidebarToggle:hover{background:var(--acc);color:#fff}
 ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#232b38;border-radius:4px}
 </style></head><body>
 <div id="app">
-  <aside class="side">
+  <aside class="side" id="sidebar">
     <div class="brand">♻️ self-purify-agent<small>自进化 · 自净化 · 越用越准</small></div>
     <button class="newchat" onclick="newConv()">＋ 新对话</button>
     <div id="convs"></div>
     <div class="side-foot">
       <div id="llmPill">检查配置中…</div>
-      <button onclick="openEvo()">📈 进化面板</button>
-      <a id="dashLink" href="http://127.0.0.1:3790" target="_blank">🩺 净化观测台</a>
-      <button onclick="openCfg()">⚙️ LLM 配置</button>
+      <button onclick="openEvo()">[E] 进化面板</button>
+      <a id="dashLink" href="http://127.0.0.1:3790" target="_blank">[D] 净化观测台</a>
+      <button onclick="openCfg()">[C] LLM 配置</button>
     </div>
   </aside>
+  <button id="sidebarToggle" onclick="toggleSidebar()" title="折叠/展开侧栏">[ ]</button>
 
   <main>
     <header>
@@ -149,7 +154,7 @@ aside.evo h3:first-child{margin-top:0}
 'use strict';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={convs:[],convId:null,sending:false,evoOpen:false};
+const state={convs:[],convId:null,sending:false,evoOpen:false,sidebarOpen:true};
 
 const EXAMPLES=[
   ['帮我总结 node:sqlite 的核心用法','沉淀为技能，下次同类问题直接复用'],
@@ -343,4 +348,16 @@ async function refreshEvo(){
 }
 
 init();
+
+/* ── 侧栏折叠 ── */
+function toggleSidebar(){
+  state.sidebarOpen=!state.sidebarOpen;
+  $('sidebar').classList.toggle('collapsed',!state.sidebarOpen);
+  $('sidebarToggle').textContent=state.sidebarOpen?'[ ]':'[ ]';
+  localStorage.setItem('spa_sidebar_open',state.sidebarOpen?'1':'0');
+}
+(function(){
+  const kept=localStorage.getItem('spa_sidebar_open');
+  if(kept==='0'){state.sidebarOpen=false;$('sidebar').classList.add('collapsed');$('sidebarToggle').textContent='[ ]';}
+})();
 </script></body></html>
