@@ -168,6 +168,25 @@ CREATE TABLE IF NOT EXISTS prompt_registry (
   UNIQUE(role, version)
 );
 
+-- ───────── Web 对话（ChatGPT 式界面）─────────
+CREATE TABLE IF NOT EXISTS conversations (
+  id            TEXT PRIMARY KEY,
+  title         TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id            TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  role          TEXT NOT NULL,            -- user | assistant
+  content       TEXT NOT NULL,
+  task_id       TEXT,                     -- assistant 消息关联的轨迹
+  meta          TEXT,                     -- JSON: {outcome, basis, durationMs, quick, contextUsed}
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
+
 -- ───────── 调参留痕（自动调参每步变更可审计可回退，§8.3.1） ─────────
 CREATE TABLE IF NOT EXISTS tune_logs (
   id            TEXT PRIMARY KEY,

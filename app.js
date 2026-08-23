@@ -98,6 +98,12 @@ async function main() {
     return;
   }
 
+  if (has('--web')) {
+    const { startWeb } = await import('./web.js');
+    await startWeb();
+    return;
+  }
+
   if (has('--serve')) {
     const { MonitorView } = await import('./extend/monitor-view.js');
     const { createServer } = await import('node:http');

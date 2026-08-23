@@ -52,18 +52,28 @@ export class AgentExecutor {
     return this.store.getState('tuned_retrieval', { sim: CONFIG.W_SIM_DEFAULT ?? 0.6, quality: 0.25, recency: 0.15 });
   }
 
-  /** 上下文装配（§5.4 固定顺序；先预算后填充，各类保底 1 条） */
+  /** 上下文装配（§5.4 固定顺序；先预算后填充，各类保底 1 条）。返回 {text, used}，used 供前端展示「本次用了什么」 */
   assembleContext(taskInput, skillOverride = null) {
     const w = this.retrievalWeights();
+    const used = { skills: [], memories: [], experiences: [] };
     const skills = skillOverride
       ? [{ id: skillOverride.id, text: `技能「${skillOverride.name}」：${skillOverride.description} 步骤：${skillOverride.steps}`, weight: 1 }]
-      : this.skills.retrieve(taskInput, undefined, w).map((r) => ({ id: r.row.id, text: `技能「${r.row.name}」：${r.row.description}`, weight: r.score }));
-    const memories = this.memory.retrieve(taskInput, undefined, w).map((r) => ({ id: r.row.id, text: r.row.content, weight: r.score }));
-    const experiences = this.experience.retrieve(taskInput, undefined, w).map((r) => ({
-      id: r.row.id,
-      text: `经验：${r.row.summary}；规则：${(JSON.parse(r.row.rules || '[]')).join('；')}`,
-      weight: r.score,
-    }));
+      : this.skills.retrieve(taskInput, undefined, w).map((r) => {
+          used.skills.push({ id: r.row.id, name: r.row.name, q: Number(r.row.quality_score.toFixed(2)) });
+          return { id: r.row.id, text: `技能「${r.row.name}」：${r.row.description}`, weight: r.score };
+        });
+    const memories = this.memory.retrieve(taskInput, undefined, w).map((r) => {
+      used.memories.push({ id: r.row.id, excerpt: r.row.content.slice(0, 40), q: Number(r.row.quality_score.toFixed(2)) });
+      return { id: r.row.id, text: r.row.content, weight: r.score };
+    });
+    const experiences = this.experience.retrieve(taskInput, undefined, w).map((r) => {
+      used.experiences.push({ id: r.row.id, summary: r.row.summary.slice(0, 40), q: Number(r.row.quality_score.toFixed(2)) });
+      return {
+        id: r.row.id,
+        text: `经验：${r.row.summary}；规则：${(JSON.parse(r.row.rules || '[]')).join('；')}`,
+        weight: r.score,
+      };
+    });
     const assembled = assembleWithinBudget(
       [
         { name: '技能', items: skills },
@@ -72,54 +82,71 @@ export class AgentExecutor {
       ],
       Math.floor(CONFIG.MAX_CONTEXT_TOKEN * 0.6)
     );
-    return assembled
+    const text = assembled
       .filter((s) => s.items.length)
       .map((s) => `【${s.name}】\n${s.items.map((i) => `- ${i.text}`).join('\n')}`)
       .join('\n\n');
+    return { text, used };
   }
 
-  /** 执行单个任务。opts: { assertion, skillOverride, silent, goldenCheck, label } */
+  /** 执行单个任务。opts: { assertion, skillOverride, silent, goldenCheck, label, quick, onProgress } */
   async runTask(input, opts = {}) {
     const start = Date.now();
     const id = uuid7();
     const label = opts.label ?? `task:${id}`;
     const budgetWarn = budgetExhausted();
-    const context = this.assembleContext(input, opts.skillOverride ?? null);
+    const { text: context, used } = this.assembleContext(input, opts.skillOverride ?? null);
+    const progress = (evt) => { try { opts.onProgress?.(evt); } catch { /* 进度回调失败不影响任务 */ } };
 
     let plan = null, steps = [], answer = null, error = null;
     try {
-      for (let i = 0; i <= CONFIG.PLAN_RETRY_MAX && !plan; i++) {
-        plan = await this.planOnce(input, context, label);
-      }
-      if (!plan) throw new Error('规划失败（LLM 弃权）');
-
-      for (const step of plan.steps) {
-        // 每步前置红线检查（§6.2.6/§8.1：命中即拦截并记录风险事件）
-        const rc = checkStep(step, { toolRuntime: this.tools, config: CONFIG });
-        if (!rc.ok) {
-          this.store.setState('last_risk_event', { at: Date.now(), task: id, step: step.goal, reason: rc.reason });
-          throw new Error(`步骤「${step.goal}」触红线被拦截：${rc.reason}`);
+      if (opts.quick) {
+        // 快速模式：单次直接回答（仍走判定+进化钩子，保持自进化信号）
+        progress({ stage: 'answer', label: '快速回答' });
+        const fin = await chat({
+          messages: [
+            { role: 'system', content: this.prompt('final') + (context ? `\n可用背景：\n${context}` : '') },
+            { role: 'user', content: input },
+          ], temperature: 0.3, label,
+        });
+        answer = fin.text?.trim();
+        plan = { steps: [], quick: true };
+      } else {
+        for (let i = 0; i <= CONFIG.PLAN_RETRY_MAX && !plan; i++) {
+          plan = await this.planOnce(input, context, label);
         }
-        let output = null, tries = 0;
-        while (output == null && tries <= CONFIG.STEP_RETRY_MAX) {
-          tries++;
-          // 任务预算 L1 熔断（§8.3）：超出 → 中止任务并复盘（失败也是进化素材）
-          if (labelBudgetLeft(label, CONFIG.TASK_TOKEN_BUDGET) <= 0) {
-            throw new Error('任务预算熔断（TASK_TOKEN_BUDGET 耗尽）');
+        if (!plan) throw new Error('规划失败（LLM 弃权）');
+        progress({ stage: 'plan', steps: plan.steps.map((s) => s.goal) });
+
+        for (const [i, step] of plan.steps.entries()) {
+          progress({ stage: 'step', idx: i + 1, total: plan.steps.length, goal: step.goal });
+          // 每步前置红线检查（§6.2.6/§8.1：命中即拦截并记录风险事件）
+          const rc = checkStep(step, { toolRuntime: this.tools, config: CONFIG });
+          if (!rc.ok) {
+            this.store.setState('last_risk_event', { at: Date.now(), task: id, step: step.goal, reason: rc.reason });
+            throw new Error(`步骤「${step.goal}」触红线被拦截：${rc.reason}`);
           }
-          output = await this.execStep(step, { input, steps, context, label });
+          let output = null, tries = 0;
+          while (output == null && tries <= CONFIG.STEP_RETRY_MAX) {
+            tries++;
+            if (labelBudgetLeft(label, CONFIG.TASK_TOKEN_BUDGET) <= 0) {
+              throw new Error('任务预算熔断（TASK_TOKEN_BUDGET 耗尽）');
+            }
+            output = await this.execStep(step, { input, steps, context, label });
+          }
+          if (output == null) throw new Error(`步骤「${step.goal}」连续失败`);
+          steps.push({ goal: step.goal, action: step.action, output: String(output).slice(0, 500) });
         }
-        if (output == null) throw new Error(`步骤「${step.goal}」连续失败`);
-        steps.push({ goal: step.goal, action: step.action, output: String(output).slice(0, 500) });
-      }
 
-      const fin = await chat({
-        messages: [
-          { role: 'system', content: this.prompt('final') },
-          { role: 'user', content: `任务：${input}\n步骤结果：${JSON.stringify(steps)}\n最终回答：` },
-        ], temperature: 0.2, label,
-      });
-      answer = fin.text?.trim();
+        progress({ stage: 'answer', label: '综合回答' });
+        const fin = await chat({
+          messages: [
+            { role: 'system', content: this.prompt('final') },
+            { role: 'user', content: `任务：${input}\n步骤结果：${JSON.stringify(steps)}\n最终回答：` },
+          ], temperature: 0.2, label,
+        });
+        answer = fin.text?.trim();
+      }
     } catch (e) {
       error = String(e?.message ?? e);
     }
@@ -136,7 +163,7 @@ export class AgentExecutor {
     }
 
     const duration = Date.now() - start;
-    const trace = { id, input, plan, steps, answer, outcome, basis, error, duration_ms: duration };
+    const trace = { id, input, plan, steps, answer, outcome, basis, error, duration_ms: duration, contextUsed: used };
     const u = getUsage(label);
     await runExclusive('task:write', () => {
       this.store.db.prepare(

@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node tui.js",
+    "web": "node web.js",
     "serve": "node app.js --serve",
     "watchdog": "node app.js --watchdog",
     "cluster": "node app.js --cluster 2",

@@ -53,6 +53,45 @@ function breakerRecord(ok, now = Date.now()) {
   }
 }
 
+// ── 运行时热配置（Web 界面改 Key/模型即时生效，免重启）──
+const runtime = {};
+export function setRuntimeConfig(cfg) { Object.assign(runtime, cfg); }
+export function effectiveLLM() {
+  return {
+    apiKey: runtime.apiKey ?? CONFIG.LLM_API_KEY,
+    baseUrl: runtime.baseUrl ?? CONFIG.LLM_BASE_URL,
+    model: runtime.model ?? CONFIG.LLM_MODEL,
+  };
+}
+
+/** 连接测试（Web 配置页「测试连接」按钮） */
+export async function pingLLM({ baseUrl, apiKey, model } = {}) {
+  if (CONFIG.MOCK) return { ok: true, latencyMs: 1, reply: 'mock', mock: true };
+  const eff = effectiveLLM();
+  const url = baseUrl ?? eff.baseUrl;
+  const key = apiKey ?? eff.apiKey;
+  const mdl = model ?? eff.model;
+  if (!key) return { ok: false, error: '未配置 API Key' };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15_000);
+  const start = Date.now();
+  try {
+    const res = await fetch(`${url}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: mdl, messages: [{ role: 'user', content: 'ping' }], max_tokens: 8 }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${(await res.text()).slice(0, 160)}` };
+    const data = await res.json();
+    return { ok: true, latencyMs: Date.now() - start, reply: (data?.choices?.[0]?.message?.content ?? '').slice(0, 60) };
+  } catch (e) {
+    clearTimeout(timer);
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 原始 chat 调用（带重试/超时/熔断/标签计量）。MOCK 模式走 mockChat。 */
@@ -63,7 +102,8 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
     recordUsage(r.usage, label);
     return r;
   }
-  if (!CONFIG.LLM_API_KEY) throw new Error('未配置 LLM_API_KEY（config/local.json 或环境变量 SPA_API_KEY）');
+  const eff = effectiveLLM();
+  if (!eff.apiKey) throw new Error('未配置 LLM_API_KEY（config/local.json 或环境变量 SPA_API_KEY）');
 
   let lastErr;
   for (let attempt = 0; attempt <= CONFIG.LLM_MAX_RETRIES; attempt++) {
@@ -72,10 +112,10 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
     const timer = setTimeout(() => ac.abort(), CONFIG.LLM_TIMEOUT_MS);
     try {
       usage.calls++;
-      const res = await fetch(`${CONFIG.LLM_BASE_URL}/chat/completions`, {
+      const res = await fetch(`${eff.baseUrl}/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CONFIG.LLM_API_KEY}` },
-        body: JSON.stringify({ model: CONFIG.LLM_MODEL, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${eff.apiKey}` },
+        body: JSON.stringify({ model: eff.model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
         signal: ac.signal,
       });
       clearTimeout(timer);

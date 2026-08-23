@@ -5,3 +5,4 @@ logs/
 .tmp-*/
 config/local.json
 *.log
+env/.env

@@ -15,6 +15,7 @@ switch (cmd) {
   case undefined:
   case 'tui': spawnNode('tui.js', rest); break;
   case 'task': spawnNode('app.js', ['--task', ...rest]); break;
+  case 'web': spawnNode('web.js', rest); break;
   case 'status': spawnNode('app.js', ['--status']); break;
   case 'demo': spawnNode('app.js', ['--demo']); break;
   case 'test': console.log('请使用: npm test'); break;
