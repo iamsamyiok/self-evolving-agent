@@ -1,6 +1,6 @@
 {
   "name": "self-purify-agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "自净化全自动进化 AI Agent —— 功能完整版（零依赖 Node.js，指导书 v2.0 三阶段全实现）",
   "type": "module",
   "private": true,
