@@ -1,0 +1,7 @@
+node_modules/
+data/
+snapshots/
+logs/
+.tmp-*/
+config/local.json
+*.log

@@ -1,0 +1,20 @@
+{
+  "name": "self-purify-agent",
+  "version": "0.1.0",
+  "description": "自净化全自动进化 AI Agent —— 零依赖 Node.js MVP（指导书 v2.0 第 11.1 节第一阶段）",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "spa": "./bin/spa.js"
+  },
+  "scripts": {
+    "start": "node tui.js",
+    "headless": "node app.js",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "backup": "node scripts/backup.js",
+    "restore": "node scripts/restore.js"
+  }
+}
