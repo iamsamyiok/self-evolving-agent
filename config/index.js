@@ -33,7 +33,8 @@ export const CONFIG = {
   LLM_MODEL: env.SPA_MODEL ?? local.LLM_MODEL ?? 'deepseek-chat',
   LLM_TIMEOUT_MS: 60_000,
   LLM_MAX_RETRIES: 4,
-  LLM_CONCURRENCY: 4,
+  LLM_CONCURRENCY: 2,  // 降低并发，避免触发限流
+  LLM_RATE_LIMIT_PER_MIN: 20,  // 每分钟最大请求数（免费版限制）
 
   // ── Embedding（三级降级 §4.1.3：none=BM25 | openai-compatible=向量）──
   EMBEDDING_PROVIDER: env.SPA_EMBED_PROVIDER ?? local.EMBEDDING_PROVIDER ?? 'none',
@@ -93,10 +94,17 @@ export const CONFIG = {
   TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? join(ROOT, 'data', 'workspace'),
   TOOL_TIMEOUT_MS: 15_000,
   TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? '0') === '1', // 默认禁用命令行工具
-  TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn']),
+  TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn', 'api.anysearch.com', 'news.google.com']),
+  // 开放网络模式（默认开）：http_get 不再受白名单限制，可访问任意公网站点（仍拦私网 SSRF 与凭据外传）
+  TOOL_NET_OPEN: (env.SPA_TOOL_NET_OPEN ?? local.TOOL_NET_OPEN ?? '1') === '1',
+  NEWS_API_KEY: env.NEWS_API_KEY ?? '',  // 可选：NewsAPI 密钥（免费层 100 次/天）
+  ANYSEARCH_API_KEY: env.ANYSEARCH_API_KEY ?? '',  // 可选：AnySearch API Key（推荐注册获取更高配额）
 
   // ── 任务执行 ──
   PLAN_RETRY_MAX: 2,
+  MEMORY_MIN_IMPORTANCE: 0.55, // 记忆入库门槛（低于此重要性的抽取候选直接丢弃）
+  PLAN_MAX_STEPS: 8, // 复杂任务允许更深分解（规划器输出截断上限）
+  REPLAN_MAX: 2, // 执行失败后的重新规划次数（每次前置预算守卫，耗尽自动停）
   STEP_RETRY_MAX: 3,
 
   // ── 黄金集冷启动 ──

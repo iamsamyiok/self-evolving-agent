@@ -31,6 +31,12 @@ test.before(async () => {
   await web.listen(port);
 });
 
+test.after(async () => {
+  // 释放句柄：HTTP server 与 DB，避免进程挂起
+  try { web?.close(); } catch { /* ignore */ }
+  try { store?.close(); } catch { /* ignore */ }
+});
+
 async function readNdjson(res) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();

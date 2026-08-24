@@ -66,9 +66,30 @@ export class Store {
   constructor(dataDir = CONFIG.DATA_DIR) {
     this.dataDir = dataDir;
     mkdirSync(join(dataDir, 'lost_and_found'), { recursive: true });
-    this.db = new DatabaseSync(join(dataDir, 'agent.db'));
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    this._db = new DatabaseSync(join(dataDir, 'agent.db'));
+    this._db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     this.migrate();
+  }
+
+  /** closed 守卫：close() 后所有库访问统一抛 store_closed（比 better-sqlite 的 "database is not open" 语义明确，上层可精确捕获静默） */
+  get db() {
+    if (this._closed) throw new Error('store_closed');
+    return this._db;
+  }
+
+  get closed() { return !!this._closed; }
+
+  close() {
+    if (this._closed) return;
+    this._closed = true;
+    this._db.close();
+  }
+
+  /** 快照回滚后重绑新库句柄（auto-control.rollbackSnapshot 使用） */
+  reattach(fresh) {
+    this._closed = false;
+    this._db = fresh._db;
+    this.dataDir = fresh.dataDir;
   }
 
   migrate() {
@@ -97,8 +118,6 @@ export class Store {
     }
     this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)').run(Date.now());
   }
-
-  close() { this.db.close(); }
 
   // ── system_state ──
   getState(key, fallback = null) {

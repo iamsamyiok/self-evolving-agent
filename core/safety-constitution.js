@@ -25,9 +25,19 @@ export function checkStep(step, { toolRuntime, config }) {
   if (action.startsWith('tool:')) {
     if (!config.TOOLS_ENABLED) return { ok: false, reason: 'R5: 工具体系未启用' };
     const name = action.slice(5);
-    const tool = toolRuntime?.get(name);
-    if (!tool) return { ok: false, reason: `R5: 未注册工具 ${name}` };
-    const perm = tool.checkPermissions?.(params) ?? { ok: true };
+    // skill:* 工具：检查技能是否存在且活跃
+    if (name.startsWith('skill:')) {
+      const skillName = name.slice(6);
+      const skillSystem = toolRuntime?.skillSystem;
+      if (!skillSystem) return { ok: false, reason: `R5: 未找到技能系统引用` };
+      const skill = skillSystem.active().find((s) => s.name === skillName);
+      if (!skill) return { ok: false, reason: `R5: 未找到活跃技能 ${skillName}` };
+      return { ok: true };
+    }
+    const resolved = toolRuntime?.resolve?.(name) ?? (toolRuntime?.get(name) ? name : undefined);
+    if (!resolved) return { ok: false, reason: `R5: 未注册工具 ${name}` };
+    const tool = toolRuntime.get(resolved) ?? { checkPermissions: () => ({ ok: true }) };
+    const perm = tool.checkPermissions?.(toolRuntime.constructor.normalizeParams?.(resolved, params) ?? params) ?? { ok: true };
     if (!perm.ok) return { ok: false, reason: `R2/R5: 工具 ${name} 越权：${perm.reason}` };
     return { ok: true };
   }

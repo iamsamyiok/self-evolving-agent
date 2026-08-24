@@ -53,7 +53,8 @@ export class MemorySystem {
       this.store.insert('memory', {
         id, state: 'ACTIVE', version: 1, parent_id: null, origin: 'evolve',
         created_at: now, updated_at: now, immunity_until: imm,
-        execution_count: 0, quality_score: 0.5, embedding: null,
+        execution_count: 0, quality_score: Math.max(0.3, importance), // 初始质量 = 重要性（复用/沉淀动态修正）
+        embedding: null,
         quarantined_at: null, purge_after: null, last_used_at: now,
         tier, kind, content, importance, access_count: 0,
         expires_at: expiresAt, supersede_of: supersedeOf, entities: null, task_id: taskId,
@@ -110,9 +111,13 @@ export class MemorySystem {
   /** 任务轨迹 → 候选记忆抽取（异步管线，不阻塞下一任务）。LLM 不可用/弃权时降级为直接沉淀任务要点。 */
   async extractFromTrace(trace) {
     if (!trace?.input) return [];
+    // infra 类失败（限流/熔断/超时）无记忆价值，跳过抽取避免噪声入库
+    if (trace.outcome === 'FAIL' && /熔断|429|超时|ECONNREFUSED|ETIMEDOUT|rate limit/i.test(String(trace.error ?? ''))) {
+      return [];
+    }
     const prompt = [
-      { role: 'system', content: '你是记忆抽取器。从任务轨迹中提取值得长期记住的事实/流程要点，输出 JSON：{"memories":[{"content":"...","kind":"semantic|episodic|procedural","importance":0.0-1.0}]}。没有值得记的就输出空数组。' },
-      { role: 'user', content: `任务：${trace.input}\n结果：${trace.outcome}\n回答摘要：${(trace.answer ?? '').slice(0, 400)}` },
+      { role: 'system', content: '你是记忆抽取器。只提取「未来同类任务能直接复用的具体事实或方法」。输出 JSON：{"memories":[{"content":"...","kind":"semantic|episodic|procedural","importance":0.0-1.0}]}，没有就输出空数组。\n\n好记忆（具体、可复用）：\n- "GitHub 仓库页用 http_get 拿到的是 HTML，需提取 title/正文再用"\n- "复利公式 (1+r)^n*P，用 calc 工具精确计算"\n\n坏记忆（任务复述，禁止输出）：\n- "任务成功完成了" / "用户问了天气问题" / "步骤执行顺利"\n- 与任务无泛化价值的过程描述' },
+      { role: 'user', content: `任务：${trace.input}\n结果：${trace.outcome}\n步骤要点：${JSON.stringify((trace.steps ?? []).map((s) => s.goal)).slice(0, 300)}\n回答摘要：${(trace.answer ?? '').slice(0, 400)}` },
     ];
     const out = await chatJson({
       messages: prompt,
@@ -122,11 +127,14 @@ export class MemorySystem {
     const candidates = out?.memories ?? [];
     const results = [];
     for (const c of candidates.slice(0, 3)) {
+      const importance = Math.min(1, Math.max(0, Number(c.importance) || 0.5));
+      // 质量门槛：低重要性记忆不入库（复述型任务 LLM 常给 0.4-0.5，真实复用价值需 ≥0.55）
+      if (importance < (CONFIG.MEMORY_MIN_IMPORTANCE ?? 0.55)) continue;
       results.push(await this.create({
         content: c.content.trim().slice(0, 300),
         kind: ['semantic', 'episodic', 'procedural'].includes(c.kind) ? c.kind : 'semantic',
         tier: 'short',
-        importance: Math.min(1, Math.max(0, Number(c.importance) || 0.5)),
+        importance,
         taskId: trace.id,
       }));
     }

@@ -206,7 +206,7 @@ export class AutoControl {
     }
     const fresh = new StoreClass(this.dataDir);
     // 外壳重绑：保持引用不变的前提下接管新库句柄
-    Object.assign(this.store, { db: fresh.db, dataDir: fresh.dataDir });
+    this.store.reattach(fresh);
     this.event('snapshot_rollback', { snapshot: snapshotFile });
     return { ok: true, restored: snapshotFile };
   }

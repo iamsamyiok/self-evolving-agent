@@ -1,5 +1,5 @@
 // web.js —— ChatGPT 式 Web 界面入口：对话即任务，每轮自动进化，后台持续净化
-// 端口默认 3789（SPA_WEB_PORT 可改）；同时挂净化面板（3790，SPA_DASHBOARD_PORT）
+// 端口默认 3789（SPA_WEB_PORT 可改）；同时挂观测面板（3790，SPA_DASHBOARD_PORT）
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -161,7 +161,47 @@ export class WebServer {
           return send(200, { ok: true });
         }
       }
+      // ── 能力分享（社会化进化）：导出/导入技能+记忆+经验 ──
+      if (req.method === 'GET' && path === '/api/share/export') {
+        const types = (url.searchParams.get('types') ?? 'skill,memory,experience').split(',');
+        const pack = { format: 'evo-agent-share', version: 1, exportedAt: Date.now(), items: [] };
+        const TABLES = { skill: 'skills', memory: 'memories', experience: 'experiences' };
+        for (const ty of types) {
+          if (!TABLES[ty]) continue;
+          const rows = this.store.db.prepare(`SELECT * FROM ${TABLES[ty]} WHERE state = 'ACTIVE'`).all();
+          for (const r of rows) {
+            pack.items.push({
+              type: ty,
+              name: r.name ?? null, scenario: r.scenario ?? null, description: r.description ?? null,
+              content: r.content ?? null, summary: r.summary ?? null, rules: r.rules ?? null,
+              steps: r.steps ?? null, kind: r.kind ?? null, importance: r.importance ?? null,
+              quality_score: r.quality_score,
+            });
+          }
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="evo-agent-share-${Date.now()}.json"`,
+        });
+        return res.end(JSON.stringify(pack, null, 2));
+      }
+      if (req.method === 'POST' && path === '/api/share/import') {
+        const b = await body();
+        return send(200, this.importShare(b));
+      }
       if (req.method === 'POST' && path === '/api/chat') return this.handleChat(req, res, await body());
+      // 任务结果查询（断线重连恢复：任务结束落库后可凭 taskId 取回，未结束返回 pending）
+      const taskMatch = path.match(/^\/api\/task\/([\w-]+)$/);
+      if (taskMatch && req.method === 'GET') {
+        const row = this.store.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskMatch[1]);
+        if (!row) return send(200, { status: 'pending' }); // 还在执行（结束才落库）
+        const msg = this.store.db.prepare('SELECT meta FROM messages WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(row.id);
+        return send(200, {
+          status: row.outcome ? 'done' : 'pending',
+          outcome: row.outcome, basis: row.outcome_basis, answer: row.answer, error: row.error,
+          durationMs: row.duration_ms, meta: msg?.meta ? JSON.parse(msg.meta) : null,
+        });
+      }
       res.writeHead(404); res.end('not found');
     } catch (e) {
       if (!res.headersSent) send(500, { error: String(e?.message ?? e) });
@@ -203,10 +243,12 @@ export class WebServer {
       : content;
 
     try {
-      send({ type: 'stage', stage: 'start', quick });
+      const taskId = uuid7();
+      send({ type: 'stage', stage: 'start', quick, taskId });
       const trace = await this.loop.submitTask(input, {
         quick,
         silent: true,
+        taskId,
         onProgress: (e) => send({ type: 'stage', ...e }),
       });
       const meta = {
@@ -231,6 +273,58 @@ export class WebServer {
     return new Promise((resolve) => this.server.listen(port, () => resolve(this.server)));
   }
   close() { this.server?.close(); }
+
+  /** 能力包导入（社会化进化）：格式校验 → 逐条去重 → origin=imported 入库。技能以 DRAFT 入（须过本地黄金门禁，防外部劣质技能直接生效） */
+  importShare(pack) {
+    if (pack?.format !== 'evo-agent-share' || !Array.isArray(pack.items)) {
+      return { ok: false, error: '无效能力包（须由「导出能力」生成的 JSON）' };
+    }
+    if (pack.items.length > 200) return { ok: false, error: '单次导入上限 200 条' };
+    const stat = { imported: 0, skipped: 0, rejected: 0, byType: {} };
+    const now = Date.now();
+    const imm = now + 24 * 3600_000;
+    for (const it of pack.items.slice(0, 200)) {
+      try {
+        if (it.type === 'skill') {
+          if (!it.name || !it.steps) { stat.rejected++; continue; }
+          const dup = this.store.db.prepare("SELECT id FROM skills WHERE name = ? AND state IN ('ACTIVE','DRAFT')").get(it.name);
+          if (dup) { stat.skipped++; continue; }
+          this.store.db.prepare(
+            `INSERT INTO skills (id, state, version, parent_id, origin, created_at, updated_at, immunity_until, execution_count, quality_score, embedding, quarantined_at, purge_after, last_used_at, name, scenario, description, steps, params_schema, success_count, fail_count, verified, heat)
+             VALUES (?, 'DRAFT', 1, NULL, 'imported', ?, ?, ?, 0, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, 0, 0, 0, 'warm')`
+          ).run(uuid7(), now, now, imm, Math.min(0.9, Math.max(0.2, Number(it.quality_score) || 0.5)),
+            String(it.name).slice(0, 60), String(it.scenario ?? it.description ?? '').slice(0, 200),
+            String(it.description ?? '').slice(0, 300), typeof it.steps === 'string' ? it.steps.slice(0, 8000) : JSON.stringify(it.steps).slice(0, 8000));
+          stat.imported++; stat.byType.skill = (stat.byType.skill ?? 0) + 1;
+        } else if (it.type === 'memory') {
+          if (!it.content || String(it.content).trim().length < 4) { stat.rejected++; continue; }
+          const exists = this.store.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE content = ? AND state = 'ACTIVE'").get(String(it.content));
+          if (exists.n > 0) { stat.skipped++; continue; }
+          this.store.db.prepare(
+            `INSERT INTO memories (id, state, version, parent_id, origin, created_at, updated_at, immunity_until, execution_count, quality_score, embedding, quarantined_at, purge_after, last_used_at, tier, kind, content, importance, access_count, expires_at, supersede_of, entities, task_id)
+             VALUES (?, 'ACTIVE', 1, NULL, 'imported', ?, ?, ?, 0, ?, NULL, NULL, NULL, ?, 'long', ?, ?, ?, 0, NULL, NULL, NULL, NULL)`
+          ).run(uuid7(), now, now, imm, Math.min(0.9, Math.max(0.2, Number(it.quality_score) || 0.5)), now,
+            ['semantic', 'episodic', 'procedural'].includes(it.kind) ? it.kind : 'semantic',
+            String(it.content).slice(0, 300), Math.min(1, Math.max(0, Number(it.importance) || 0.6)));
+          stat.imported++; stat.byType.memory = (stat.byType.memory ?? 0) + 1;
+        } else if (it.type === 'experience') {
+          if (!it.summary || String(it.summary).trim().length < 4) { stat.rejected++; continue; }
+          const exists = this.store.db.prepare("SELECT COUNT(*) AS n FROM experiences WHERE summary = ? AND state = 'ACTIVE'").get(String(it.summary));
+          if (exists.n > 0) { stat.skipped++; continue; }
+          this.store.db.prepare(
+            `INSERT INTO experiences (id, state, version, parent_id, origin, created_at, updated_at, immunity_until, execution_count, quality_score, embedding, quarantined_at, purge_after, last_used_at, task_signature, summary, rules, pitfalls, failure_taxonomy, evidence, sample_count, success_count, fail_count)
+             VALUES (?, 'ACTIVE', 1, NULL, 'imported', ?, ?, ?, 0, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)`
+          ).run(uuid7(), now, now, imm, Math.min(0.9, Math.max(0.2, Number(it.quality_score) || 0.5)), now,
+            String(it.summary).slice(0, 120),
+            String(it.summary).slice(0, 200), typeof it.rules === 'string' ? it.rules : JSON.stringify(it.rules ?? []),
+            JSON.stringify(it.pitfalls ?? []), it.failure_taxonomy ?? null,
+            JSON.stringify([{ imported: true, at: now }]));
+          stat.imported++; stat.byType.experience = (stat.byType.experience ?? 0) + 1;
+        } else { stat.rejected++; }
+      } catch { stat.rejected++; }
+    }
+    return { ok: true, ...stat };
+  }
 }
 
 /** 独立启动入口：node web.js */
@@ -263,13 +357,13 @@ export async function startWeb({ port = Number(process.env.SPA_WEB_PORT ?? 3789)
   await web.listen(port);
   console.log(`[web] 对话界面  http://127.0.0.1:${port}   （ChatGPT 式 · 每轮对话自动进化）`);
 
-  // 同步挂净化面板（观测用，只读）
+  // 同步挂观测面板（只读）
   try {
     const { MonitorView, bindLlm } = await import('./extend/monitor-view.js');
     bindLlm(await import('./core/llm-adapter.js'));
     const dash = new MonitorView({ store, loop, purify, control });
     await dash.listen(CONFIG.DASHBOARD_PORT, (input) => loop.submitTask(input));
-    console.log(`[web] 净化面板  http://127.0.0.1:${CONFIG.DASHBOARD_PORT}`);
+    console.log(`[web] 观测面板  http://127.0.0.1:${CONFIG.DASHBOARD_PORT}`);
   } catch (e) { console.warn('[web] 面板启动失败（不影响对话）:', e.message); }
 
   return { web, store, executor, purify, loop, control };

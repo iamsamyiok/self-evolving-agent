@@ -22,6 +22,43 @@ function confine(p, root) {
 }
 
 export class ToolRuntime {
+  /** LLM 常见幻觉工具名 → 真实注册名的模糊映射（规划器宽容层） */
+  static ALIASES = {
+    search: 'news_search', web_search: 'news_search', news: 'news_search',
+    search_news: 'news_search', google_search: 'news_search', news_query: 'news_search',
+    read_file: 'fs_read', read: 'fs_read', file_read: 'fs_read', cat: 'fs_read',
+    write_file: 'fs_write', write: 'fs_write', file_write: 'fs_write', save_file: 'fs_write',
+    list: 'fs_list', list_files: 'fs_list', list_dir: 'fs_list', dir: 'fs_list',
+    get: 'http_get', fetch: 'http_get', curl: 'http_get', http: 'http_get', get_url: 'http_get',
+    weather: 'skill:get_weather',
+  };
+
+  /** 参数名归一化（吸收 LLM 参数名漂移） */
+  static normalizeParams(toolName, p = {}) {
+    const q = p.query ?? p.topic ?? p.search ?? p.q ?? p.keyword ?? p.question;
+    switch (toolName) {
+      case 'news_search':
+        return { ...p, query: q, maxResults: p.maxResults ?? p.limit ?? p.num ?? p.count ?? 5 };
+      case 'fs_read':
+        return { ...p, path: p.path ?? p.file ?? p.filename ?? p.name };
+      case 'fs_write':
+        return { ...p, path: p.path ?? p.file ?? p.filename, content: p.content ?? p.text ?? p.data };
+      case 'fs_list':
+        return { ...p, dir: p.dir ?? p.path ?? p.directory ?? '.' };
+      case 'http_get':
+        return { ...p, url: p.url ?? p.link ?? p.address };
+      default:
+        return p;
+    }
+  }
+
+  /** 名称解析：精确命中 → 别名映射 → undefined */
+  resolve(name) {
+    if (this.tools.has(name)) return name;
+    const mapped = ToolRuntime.ALIASES[name];
+    return mapped && (this.tools.has(mapped) || mapped.startsWith('skill:')) ? mapped : undefined;
+  }
+
   constructor({ workspace = CONFIG.TOOL_WORKSPACE } = {}) {
     this.workspace = workspace;
     mkdirSync(workspace, { recursive: true });
@@ -90,8 +127,16 @@ export class ToolRuntime {
         let u;
         try { u = new URL(p.url); } catch { return { ok: false, reason: '非法 URL' }; }
         const host = u.hostname;
-        const allowed = (CONFIG.TOOL_NET_WHITELIST ?? []).some((w) => host === w || host.endsWith('.' + w));
-        if (!allowed) return { ok: false, reason: `R5: 域名 ${host} 不在白名单` };
+        // 私网/回环拦截（防 SSRF 打内网，开放模式下仍保留）
+        if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?$)/.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+          return { ok: false, reason: `R5: 禁止访问私网地址 ${host}` };
+        }
+        // 开放模式：任意公网域名放行；否则走白名单
+        if (!CONFIG.TOOL_NET_OPEN) {
+          const allowed = (CONFIG.TOOL_NET_WHITELIST ?? []).some((w) => host === w || host.endsWith('.' + w));
+          if (!allowed) return { ok: false, reason: `R5: 域名 ${host} 不在白名单` };
+        }
         if (KEY_PATTERN.test(String(p.url))) return { ok: false, reason: 'R4: URL 携带凭据模式' };
         return { ok: true };
       },
@@ -99,9 +144,113 @@ export class ToolRuntime {
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), CONFIG.TOOL_TIMEOUT_MS);
         try {
-          const res = await fetch(p.url, { signal: ac.signal });
-          const text = (await res.text()).slice(0, 4096);
-          return `HTTP ${res.status}: ${text}`;
+          const res = await fetch(p.url, {
+            signal: ac.signal,
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; evo-agent/1.0)', Accept: 'text/html,application/json,text/plain,*/*' },
+          });
+          let text = (await res.text()).slice(0, 65_536);
+          const ct = res.headers.get('content-type') ?? '';
+          if (ct.includes('html')) {
+            // HTML 粗提取：title + meta 描述 + 正文文本（去脚本样式标签）
+            const title = text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
+            const metaDesc = text.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)/i)?.[1]
+              ?? text.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)/i)?.[1] ?? '';
+            const body = (text.match(/<body[^>]*>([\s\S]*)<\/body>/i)?.[1] ?? text)
+              .replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '')
+              .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+              .replace(/\s+/g, ' ').trim();
+            text = [title && `标题：${title}`, metaDesc && `描述：${metaDesc.trim()}`, `正文：${body}`].filter(Boolean).join('\n');
+          }
+          return `HTTP ${res.status}: ${text.slice(0, 4096)}`;
+        } finally { clearTimeout(timer); }
+      },
+    });
+    // ── 文件列表别名：ls = fs_list（兼容常见用法）──
+    this.register({
+      name: 'ls', desc: '列出目录（fs_list 的别名）', risk: 'low',
+      checkPermissions: (p) => ({ ok: true }),
+      run: async (p) => {
+        // 调用 fs_list 逻辑
+        const fs_list = this.tools.get('fs_list');
+        if (!fs_list) throw new Error('fs_list 工具不存在');
+        return fs_list.run({ dir: p.dir || '.' });
+      },
+    });
+    // ── 新闻搜索：AnySearch API（免费层 + API Key 可选）──
+    this.register({
+      name: 'news_search', desc: '搜索热点新闻（参数：query, maxResults, domain）', risk: 'medium',
+      checkPermissions: (p) => {
+        const hasQuery = p.query || p.topic || p.search || p.q || p.keyword;
+        if (!hasQuery) return { ok: false, reason: 'query/topic/keyword 必填' };
+        return { ok: true };
+      },
+      run: async (p) => {
+        const query = p.query || p.topic || p.search || p.q || p.keyword || '热点新闻';
+        const limit = p.maxResults || p.limit || 10;
+        const domain = p.domain || 'general';
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        try {
+          // 尝试 AnySearch API（支持匿名和 API Key）
+          const apiKey = CONFIG.ANYSEARCH_API_KEY || '';
+          const apiUrl = 'https://api.anysearch.com/v1/search';
+          const body = {
+            query: query,
+            max_results: Math.min(limit, 10),
+            tag: domain === 'general' ? undefined : domain,
+          };
+          const headers = {
+            'Content-Type': 'application/json',
+            'X-Anysearch-Client': 'agent/1.0',
+          };
+          if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+          }
+          const res = await fetch(apiUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: ac.signal,
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.data?.results && data.data.results.length > 0) {
+              return data.data.results.map((r, i) => 
+                `${i + 1}. ${r.title || '(无标题)'}\n   来源：${r.source || '网络'}\n   链接：${r.url || ''}\n   摘要：${(r.content || r.snippet || '').slice(0, 150)}`
+              ).join('\n\n');
+            }
+          }
+          // 降级：Google News RSS
+          const encodedQuery = encodeURIComponent(query);
+          const rssUrl = `https://news.google.com/rss/search?q=${encodedQuery}&hl=zh-CN&gl=CN&ceid=CN:zh`;
+          const rssRes = await fetch(rssUrl, {
+            signal: ac.signal,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+          });
+          if (!rssRes.ok) throw new Error(`HTTP ${rssRes.status}`);
+          const text = await rssRes.text();
+          const items = [];
+          const itemRegex = /<item[^>]*>([\s\S]*?)<\/item>/g;
+          let match;
+          while ((match = itemRegex.exec(text)) && items.length < limit) {
+            const item = match[1];
+            const titleMatch = item.match(/<title>([^<]+)<\/title>/);
+            const linkMatch = item.match(/<link>([^<]+)<\/link>/);
+            const sourceMatch = item.match(/<source[^>]*>([^<]+)<\/source>/);
+            if (titleMatch) {
+              items.push({
+                title: titleMatch[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+                link: linkMatch?.[1] || '',
+                source: sourceMatch?.[1] || 'Google News'
+              });
+            }
+          }
+          if (items.length > 0) {
+            return items.map((item, i) => `${i + 1}. ${item.title}\n   来源：${item.source}\n   链接：${item.link}`).join('\n\n');
+          }
+          return `未找到关于「${query}」的新闻`;
+        } catch (e) {
+          throw new Error(`新闻搜索失败：${e.message}`);
         } finally { clearTimeout(timer); }
       },
     });
@@ -127,11 +276,18 @@ export class ToolRuntime {
     });
   }
 
-  /** 统一执行入口：权限检查 → 执行 → 记录调用证据（成败/耗时，喂技能评分） */
+  /** 统一执行入口：别名解析 → 权限检查（参数归一化后）→ 执行 → 记录调用证据（成败/耗时，喂技能评分） */
   async call(name, params, { taskId } = {}) {
-    const tool = this.tools.get(name);
-    if (!tool) throw new Error(`未注册工具 ${name}`);
-    const perm = tool.checkPermissions?.(params) ?? { ok: true };
+    const resolved = this.resolve(name);
+    if (!resolved) {
+      const known = this.list().map((t) => t.name).join(', ');
+      const err = new Error(`未注册工具 ${name}（可用：${known}）`);
+      err.unknownTool = true;
+      throw err;
+    }
+    const tool = this.tools.get(resolved) ?? { name: resolved, desc: '技能调用', risk: 'medium', checkPermissions: () => ({ ok: true }) };
+    const norm = ToolRuntime.normalizeParams(resolved, params ?? {});
+    const perm = tool.checkPermissions?.(norm) ?? { ok: true };
     if (!perm.ok) {
       const err = new Error(perm.reason);
       err.blocked = true;
@@ -139,11 +295,20 @@ export class ToolRuntime {
     }
     const start = Date.now();
     try {
-      const output = await tool.run(params);
+      const output = resolved.startsWith('skill:')
+        ? await this._runSkillTool(resolved, norm)
+        : await tool.run(norm);
       return { ok: true, output, durationMs: Date.now() - start };
     } catch (e) {
       e.durationMs = Date.now() - start;
       throw e;
     }
+  }
+
+  /** skill:<name> 委托执行（经由 skillSystem.executor，避免循环依赖） */
+  async _runSkillTool(resolved, params) {
+    if (!this.skillSystem?.executor) throw new Error('技能系统未注入');
+    const skillName = resolved.slice('skill:'.length);
+    return this.skillSystem.executor.executeSkillStep(skillName, params, 'skill-tool');
   }
 }

@@ -21,6 +21,10 @@ export class ExperienceEngine {
    */
   async retrospect(trace) {
     if (!trace?.input) return null;
+    // infra 类失败（限流/熔断/超时）与任务本身质量无关，复盘只会产出"环境坏了"式噪声经验污染检索池
+    if (trace.outcome === 'FAIL' && /熔断|429|超时|ECONNREFUSED|ETIMEDOUT|rate limit/i.test(String(trace.error ?? ''))) {
+      return null;
+    }
     const prompt = [
       { role: 'system', content: '你是任务复盘器。输出 JSON：{"summary":"一句话结论","rules":["可复用规则"],"pitfalls":["避坑要点"],"failure_taxonomy":null}。failure_taxonomy 仅失败复盘时取值 plan|tool|llm|data|env。' },
       { role: 'user', content: `任务：${trace.input}\n结果：${trace.outcome}\n执行步骤：${JSON.stringify((trace.steps ?? []).map((s) => s.goal ?? s).slice(0, 8))}\n${trace.error ? '错误：' + String(trace.error).slice(0, 200) : ''}` },

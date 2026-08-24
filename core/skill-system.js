@@ -17,10 +17,11 @@ export class SkillSystem {
 
   /** 任务成功后提炼技能候选（冷启动：技能池为空属正常态，§5.1.5） */
   async distillFromTrace(trace) {
-    if (trace.outcome !== 'SUCCESS' || !trace?.input) return null;
+    if (!trace?.input) return null;
+    // 失败任务也提炼（失败模式可复用）
     const prompt = [
-      { role: 'system', content: '你是技能提炼器。判断该任务是否有可复用的成套做法。若有，输出 JSON：{"name":"snake_case名","scenario":"适用场景","description":"功能说明","steps":[{"goal":"...","action":"reason|answer","expected":"..."}]}；没有则输出 {"name":null}。' },
-      { role: 'user', content: `任务：${trace.input}\n执行步骤：${JSON.stringify((trace.steps ?? []).map((s) => s.goal ?? s).slice(0, 8))}\n回答摘要：${(trace.answer ?? '').slice(0, 300)}` },
+      { role: 'system', content: '你是技能提炼器。判断该任务是否有可复用的成套做法。若有，输出 JSON：{"name":"snake_case名","scenario":"适用场景","description":"功能说明","steps":[{"goal":"...","action":"reason|answer|tool:http_get","params":{},"expected":"..."}]}；没有则输出 {"name":null}。' },
+      { role: 'user', content: `任务：${trace.input}\n结果：${trace.outcome}\n执行步骤：${JSON.stringify((trace.steps ?? []).map((s) => ({ goal: s.goal, output: (s.output || '').slice(0, 100) })).slice(0, 8))}\n${trace.error ? '错误：' + trace.error.slice(0, 200) : ''}\n回答摘要：${(trace.answer ?? '').slice(0, 300)}` },
     ];
     const out = await chatJson({
       messages: prompt,

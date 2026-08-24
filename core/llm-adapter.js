@@ -36,7 +36,46 @@ function recordUsage(u, label) {
   }
 }
 
-// ── 熔断器：5 分钟窗口错误率 >50% 或连续 5 次失败 → 熔断 10 分钟 ──
+// ── 令牌桶限流器（§4.2：免费版限制 ~20 请求/分钟）──
+const rateLimiter = {
+  tokens: CONFIG.LLM_RATE_LIMIT_PER_MIN ?? 20,
+  maxTokens: CONFIG.LLM_RATE_LIMIT_PER_MIN ?? 20,
+  lastRefill: Date.now(),
+  queue: [],
+};
+function refillTokens(now = Date.now()) {
+  const elapsed = now - rateLimiter.lastRefill;
+  const newTokens = Math.floor(elapsed / 3000); // 每 3 秒补充 1 个令牌
+  if (newTokens > 0) {
+    rateLimiter.tokens = Math.min(rateLimiter.maxTokens, rateLimiter.tokens + newTokens);
+    rateLimiter.lastRefill = now;
+  }
+}
+export function acquireToken() {
+  return new Promise((resolve) => {
+    if (rateLimiter.tokens > 0) {
+      rateLimiter.tokens--;
+      resolve();
+    } else {
+      rateLimiter.queue.push(resolve);
+    }
+  });
+}
+function processQueue() {
+  while (rateLimiter.queue.length > 0 && rateLimiter.tokens > 0) {
+    rateLimiter.tokens--;
+    const resolve = rateLimiter.queue.shift();
+    resolve();
+  }
+}
+// 令牌补充：惰性定时器（unref 保证不阻塞进程退出；无请求时也可完全休眠）
+setInterval(() => {
+  const now = Date.now();
+  refillTokens(now);
+  processQueue();
+}, 1000).unref?.();
+
+// ── 熔断器：60 秒窗口错误率 >70% 或连续 10 次失败 → 熔断 3 分钟 ──
 const breaker = { window: [], consecutiveFails: 0, openUntil: 0 };
 function breakerAllows(now = Date.now()) {
   if (now < breaker.openUntil) return false;
@@ -45,14 +84,13 @@ function breakerAllows(now = Date.now()) {
 }
 function breakerRecord(ok, now = Date.now()) {
   breaker.window.push({ t: now, ok });
-  breaker.window = breaker.window.filter((x) => now - x.t < 300_000);
+  breaker.window = breaker.window.filter((x) => now - x.t < 600_000); // 60 秒窗口
   breaker.consecutiveFails = ok ? 0 : breaker.consecutiveFails + 1;
   const fails = breaker.window.filter((x) => !x.ok).length;
-  if (!ok && (breaker.consecutiveFails >= 5 || (breaker.window.length >= 4 && fails / breaker.window.length > 0.5))) {
-    breaker.openUntil = now + 600_000;
+  if (!ok && (breaker.consecutiveFails >= 10 || (breaker.window.length >= 6 && fails / breaker.window.length > 0.7))) {
+    breaker.openUntil = now + 180_000; // 3 分钟冷却
   }
 }
-
 // ── 运行时热配置（Web 界面改 Key/模型即时生效，免重启）──
 const runtime = {};
 export function setRuntimeConfig(cfg) { Object.assign(runtime, cfg); }
@@ -105,9 +143,11 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
   const eff = effectiveLLM();
   if (!eff.apiKey) throw new Error('未配置 LLM_API_KEY（config/local.json 或环境变量 SPA_API_KEY）');
 
+  // 获取令牌（限流）
+  await acquireToken();
   let lastErr;
   for (let attempt = 0; attempt <= CONFIG.LLM_MAX_RETRIES; attempt++) {
-    if (!breakerAllows()) throw new Error('LLM 熔断中（10 分钟），任务排队稍后重试');
+    if (!breakerAllows()) throw new Error('LLM 熔断中（3 分钟），任务排队稍后重试');
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), CONFIG.LLM_TIMEOUT_MS);
     try {
@@ -127,7 +167,8 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       return { text: data?.choices?.[0]?.message?.content ?? '', usage: data?.usage };
     } catch (err) {
       clearTimeout(timer);
-      breakerRecord(false);
+      // 429 属限流预期（已有令牌桶控速 + 指数退避），不计入熔断窗口——否则正常高峰也会误熔断
+      if (!String(err.message).startsWith('HTTP 429')) breakerRecord(false);
       usage.errors++;
       lastErr = err;
       const retryable = err.retryable || err.name === 'AbortError' || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT';
