@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync, existsSy
 import { isAbsolute, resolve, join, relative, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { CONFIG } from '../config/index.js';
+import { createSkill } from './skills/create-skill.js';
 
 const KEY_PATTERN = /sk-[a-zA-Z0-9]{16,}/;
 
@@ -59,8 +60,9 @@ export class ToolRuntime {
     return mapped && (this.tools.has(mapped) || mapped.startsWith('skill:')) ? mapped : undefined;
   }
 
-  constructor({ workspace = CONFIG.TOOL_WORKSPACE } = {}) {
+  constructor(store = null, { workspace = CONFIG.TOOL_WORKSPACE } = {}) {
     this.workspace = workspace;
+    this.store = store;
     mkdirSync(workspace, { recursive: true });
     this.tools = new Map();
     this.registerBuiltins();
@@ -74,6 +76,21 @@ export class ToolRuntime {
   register(tool) { this.tools.set(tool.name, tool); }
 
   registerBuiltins() {
+    // ── create_skill：用户技能创建工具（同步注册，确保 planner prompt 能立即看到）──
+    try {
+      this.register({
+        name: 'create_skill',
+        desc: '创建新技能（写入技能库，状态为 DRAFT）',
+        risk: 'low',
+        checkPermissions: () => ({ ok: true }),
+        run: async (p) => {
+          const r = await createSkill(p, { store: this.store });
+          return r.output;
+        },
+      });
+    } catch (e) {
+      console.warn('[tool-runtime] 加载 create_skill 失败:', e.message);
+    }
     // ── 低危：读 ──
     this.register({
       name: 'fs_list', desc: '列出沙箱工作区内目录', risk: 'low',
@@ -124,8 +141,10 @@ export class ToolRuntime {
     this.register({
       name: 'http_get', desc: 'GET 白名单域名 URL', risk: 'high',
       checkPermissions: (p) => {
+        // 容错：LLM 常给中文未编码 URL（如 bing.com/search?q=AI新闻）——自动 encodeURI 再校验
+        if (p.url && /[^\x00-\x7F]/.test(p.url)) p.url = encodeURI(p.url);
         let u;
-        try { u = new URL(p.url); } catch { return { ok: false, reason: '非法 URL' }; }
+        try { u = new URL(p.url); } catch { return { ok: false, reason: '非法 URL（http_get 仅用于确切知道完整地址的公开 API；搜索请用 news_search）' }; }
         const host = u.hostname;
         // 私网/回环拦截（防 SSRF 打内网，开放模式下仍保留）
         if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?$)/.test(host) ||
@@ -178,7 +197,7 @@ export class ToolRuntime {
     });
     // ── 新闻搜索：AnySearch API（免费层 + API Key 可选）──
     this.register({
-      name: 'news_search', desc: '搜索热点新闻（参数：query, maxResults, domain）', risk: 'medium',
+      name: 'news_search', desc: '搜索新闻/实时信息/时事热点（参数：query 关键词, maxResults 条数）——一切需要最新信息的任务首选此工具', risk: 'medium',
       checkPermissions: (p) => {
         const hasQuery = p.query || p.topic || p.search || p.q || p.keyword;
         if (!hasQuery) return { ok: false, reason: 'query/topic/keyword 必填' };

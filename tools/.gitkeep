@@ -1,0 +1,2 @@
+// 热插拔工具目录
+echo 'tools loaded'

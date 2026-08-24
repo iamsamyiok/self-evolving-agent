@@ -5,15 +5,21 @@ import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, jaccard, tokenize } from '../utils/similarity.js';
 import { wilsonLowerBound } from '../utils/stats.js';
 import { chatJson } from './llm-adapter.js';
+import { EntityIndex } from './retrieval-cache.js';
 
 export function traceHash(steps) {
   return createHash('sha256').update(JSON.stringify(steps ?? [])).digest('hex').slice(0, 16);
 }
 
 export class ExperienceEngine {
-  constructor(store = new Store()) { this.store = store; }
+  constructor(store = new Store()) {
+    this.store = store;
+    this.idx = new EntityIndex(store, 'experience', (e) => `${e.task_signature} ${e.summary}`, {
+      where: "WHERE state = 'ACTIVE'",
+    });
+  }
 
-  active() { return this.store.list('experience', "WHERE state = 'ACTIVE'"); }
+  active() { return [...this.idx.rows.values()]; }
 
   /**
    * 任务复盘：产出结构化经验。强制证据链（evidence）——无证据经验的复盘结论不允许入池（防幻影经验）。
@@ -79,37 +85,31 @@ export class ExperienceEngine {
   }
 
   findSimilar(signature) {
-    const actives = this.active();
-    if (!actives.length) return null;
-    const idx = new BM25Index(actives.map((e) => ({ id: e.id, text: e.task_signature })));
     const tokA = tokenize(signature);
-    for (const h of idx.search(signature, 3)) {
-      const row = actives.find((e) => e.id === h.id);
-      if (jaccard(tokA, tokenize(row.task_signature)) >= CONFIG.MEMORY_DUP_JACCARD) return row;
+    for (const h of this.idx.index.search(signature, 3)) {
+      const row = this.idx.rows.get(h.id);
+      if (row && jaccard(tokA, tokenize(row.task_signature)) >= CONFIG.MEMORY_DUP_JACCARD) return row;
     }
     return null;
   }
 
-  /** 检索：w·相似度 + w·Q（§5.3，权重可调参） */
+  /** 检索：w·相似度 + w·Q（§5.3，权重可调参）；命中记账走 touch 旁路 */
   retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.4 }) {
-    const actives = this.active();
-    if (!actives.length) return [];
-    const idx = new BM25Index(actives.map((e) => ({ id: e.id, text: `${e.task_signature} ${e.summary}` })));
-    const hits = idx.search(query, topK);
-    const now = Date.now();
-    const out = hits.map((h) => {
-      const row = actives.find((e) => e.id === h.id);
-      return { row, score: weights.sim * h.score + (weights.quality ?? 0.4) * row.quality_score };
-    });
-    for (const o of out) this.store.update('experience', o.row.id, { last_used_at: now });
+    const hits = this.idx.index.search(query, topK);
+    const out = [];
+    for (const h of hits) {
+      const row = this.idx.rows.get(h.id);
+      if (row) out.push({ row, score: weights.sim * h.score + (weights.quality ?? 0.4) * row.quality_score });
+    }
+    if (out.length) this.store.touch('experience', out.map((o) => o.row.id), {});
     return out;
   }
 
-  /** 经验命中的任务结果反馈（供 W 评分） */
+  /** 经验命中的任务结果反馈（供 W 评分）；统计记账走 bumpStats 直写 */
   recordOutcome(id, ok) {
     const e = this.store.get('experience', id);
     if (!e) return;
-    this.store.update('experience', id, {
+    this.store.bumpStats('experience', id, {
       success_count: e.success_count + (ok ? 1 : 0),
       fail_count: e.fail_count + (ok ? 0 : 1),
       execution_count: e.execution_count + 1,

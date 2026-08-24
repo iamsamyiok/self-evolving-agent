@@ -22,17 +22,23 @@ export class BM25Index {
   constructor(docs = []) {
     this.docTokens = new Map(); // id -> tokens
     this.df = new Map();        // token -> doc count
+    this.postings = new Map();  // token -> Set<id>（倒排：召回与查询共享 token 的文档）
+    this.totalLen = 0;          // 增量维护（避免每次 add 全量重算 avgLen 的 O(N²)）
     this.avgLen = 0;
     for (const { id, text } of docs) this.add(id, text);
   }
 
   add(id, text) {
+    if (this.docTokens.has(id)) this.remove(id); // 同 id 重复写入：先移除旧文档再重建
     const tokens = tokenize(text);
     this.docTokens.set(id, tokens);
-    for (const t of new Set(tokens)) this.df.set(t, (this.df.get(t) ?? 0) + 1);
-    let sum = 0;
-    for (const ts of this.docTokens.values()) sum += ts.length;
-    this.avgLen = sum / this.docTokens.size;
+    for (const t of new Set(tokens)) {
+      this.df.set(t, (this.df.get(t) ?? 0) + 1);
+      if (!this.postings.has(t)) this.postings.set(t, new Set());
+      this.postings.get(t).add(id);
+    }
+    this.totalLen += tokens.length;
+    this.avgLen = this.docTokens.size ? this.totalLen / this.docTokens.size : 0;
   }
 
   remove(id) {
@@ -40,9 +46,12 @@ export class BM25Index {
     if (!tokens) return;
     for (const t of new Set(tokens)) {
       const c = this.df.get(t) ?? 1;
-      if (c <= 1) this.df.delete(t); else this.df.set(t, c - 1);
+      if (c <= 1) { this.df.delete(t); this.postings.delete(t); }
+      else { this.df.set(t, c - 1); this.postings.get(t)?.delete(id); }
     }
     this.docTokens.delete(id);
+    this.totalLen -= tokens.length;
+    this.avgLen = this.docTokens.size ? this.totalLen / this.docTokens.size : 0;
   }
 
   /** 返回原始 BM25 分（无界） */
@@ -64,13 +73,18 @@ export class BM25Index {
     return s;
   }
 
-  /** top-K 检索：返回 [{id, score}]，score 归一到 [0,1]（score/(score+3) 压缩） */
+  /** top-K 检索：倒排召回共享 token 的候选再打分（O(命中集) 而非 O(全库)），返回 [{id, score}]，score 归一到 [0,1] */
   search(queryText, topK = 8) {
     const q = tokenize(queryText);
     if (!q.length || this.docTokens.size === 0) return [];
+    const cand = new Set();
+    for (const t of q) {
+      const ids = this.postings.get(t);
+      if (ids) for (const id of ids) cand.add(id);
+    }
     const out = [];
-    for (const [id, tokens] of this.docTokens) {
-      const s = this.score(q, tokens);
+    for (const id of cand) {
+      const s = this.score(q, this.docTokens.get(id));
       if (s > 0) out.push({ id, score: s / (s + 3) });
     }
     out.sort((a, b2) => b2.score - a.score);

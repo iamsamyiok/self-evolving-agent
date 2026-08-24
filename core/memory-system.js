@@ -5,14 +5,20 @@ import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, candidatePairs, jaccard, tokenize } from '../utils/similarity.js';
 import { memoryImportance } from '../utils/stats.js';
 import { chat, chatJson } from './llm-adapter.js';
+import { EntityIndex } from './retrieval-cache.js';
 
 export class MemorySystem {
   constructor(store = new Store()) {
     this.store = store;
+    // 检索索引缓存：快照校验 + 增量同步 + 冷热裁剪（记忆规模增长不拖慢检索）
+    this.idx = new EntityIndex(store, 'memory', (m) => m.content, {
+      where: "WHERE state = 'ACTIVE'",
+      maxRows: CONFIG.MEMORY_INDEX_MAX_ROWS ?? 20000,
+    });
   }
 
   activeMemories() {
-    return this.store.list('memory', "WHERE state = 'ACTIVE'");
+    return [...this.idx.rows.values()];
   }
 
   /** 被 ACTIVE 后继 supersede 的记忆视为已取代（保留不删，链式关联，§5.2） */
@@ -63,15 +69,14 @@ export class MemorySystem {
     return { status: supersedeOf ? 'superseded' : 'created', id };
   }
 
-  /** 去重检测：同 tier 下 BM25 召回 + Jaccard 精算 ≥ MEMORY_DUP_JACCARD */
+  /** 去重检测：BM25 召回（全量缓存索引）+ 同 tier 校验 + Jaccard 精算 ≥ MEMORY_DUP_JACCARD */
   findDuplicate(content, tier) {
-    const actives = this.activeMemories().filter((m) => m.tier === tier);
-    if (!actives.length) return null;
-    const idx = new BM25Index(actives.map((m) => ({ id: m.id, text: m.content })));
-    const hits = idx.search(content, 5);
+    const hits = this.idx.index.search(content, 16);
+    if (!hits.length) return null;
     const tokA = tokenize(content);
     for (const h of hits) {
-      const row = actives.find((m) => m.id === h.id);
+      const row = this.idx.rows.get(h.id);
+      if (!row || row.tier !== tier) continue;
       const sim = jaccard(tokA, tokenize(row.content));
       if (sim >= CONFIG.MEMORY_DUP_JACCARD) return { id: row.id, sim: Math.max(sim, h.score) };
     }
@@ -79,33 +84,31 @@ export class MemorySystem {
   }
 
   nearest(content, tier) {
-    const actives = this.activeMemories().filter((m) => m.tier === tier);
-    if (!actives.length) return null;
-    const idx = new BM25Index(actives.map((m) => ({ id: m.id, text: m.content })));
-    const top = idx.search(content, 1)[0];
-    if (!top) return null;
-    return { row: actives.find((m) => m.id === top.id), sim: top.score };
+    for (const h of this.idx.index.search(content, 8)) {
+      const row = this.idx.rows.get(h.id);
+      if (row && row.tier === tier) return { row, sim: h.score };
+    }
+    return null;
   }
 
-  /** 检索：score = w·相似度 + w·Q + w·时近性（权重可调参）；注入即 access_count+1（§5.2） */
+  /** 检索：score = w·相似度 + w·Q + w·时近性（权重可调参）；注入记账走 touch 旁路（不触发索引重建） */
   retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
     const superseded = this.supersededIds();
-    const actives = this.activeMemories().filter((m) => !superseded.has(m.id) && m.tier !== 'instant');
-    if (!actives.length) return [];
-    const idx = new BM25Index(actives.map((m) => ({ id: m.id, text: m.content })));
-    const hits = idx.search(query, topK * 2);
+    const hits = this.idx.index.search(query, topK * 2);
     const now = Date.now();
-    const scored = hits.map((h) => {
-      const row = actives.find((m) => m.id === h.id);
+    const scored = [];
+    for (const h of hits) {
+      const row = this.idx.rows.get(h.id);
+      if (!row || superseded.has(row.id) || row.tier === 'instant') continue;
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
       const recency = Number.isFinite(rec) ? rec : 0;
-      return { row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency };
-    }).filter((x) => x.score > 0.15); // 低分不注入，防上下文污染
-    scored.sort((a, b) => b.score - a.score);
-    for (const s of scored.slice(0, topK)) {
-      this.store.update('memory', s.row.id, { access_count: s.row.access_count + 1, last_used_at: now });
+      scored.push({ row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency });
     }
-    return scored.slice(0, topK);
+    const picked = scored.filter((x) => x.score > 0.15) // 低分不注入，防上下文污染
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+    if (picked.length) this.store.touch('memory', picked.map((s) => s.row.id), { access: true });
+    return picked;
   }
 
   /** 任务轨迹 → 候选记忆抽取（异步管线，不阻塞下一任务）。LLM 不可用/弃权时降级为直接沉淀任务要点。 */

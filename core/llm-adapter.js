@@ -3,6 +3,28 @@
 //       判定器（双采样一致才采信，否则弃权）、token 用量计量（成本护栏·轻量版）
 import { CONFIG } from '../config/index.js';
 import { extractJSON, validateShape } from '../utils/parser.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// ── 任务上下文（等待状态上报：chat() 深处的 429/排队等待要能通知到任务进度回调）──
+// agent-executor 在任务入口 run(...{progress})，chat() 等待时经此上报 → 前端不再静默僵死。
+// store 还可携带 aborted()：用户停止任务时，所有长等待（429退避/令牌排队）立即中断。
+export const taskScope = new AsyncLocalStorage();
+function notifyWait(info) {
+  try { taskScope.getStore()?.progress?.(info); } catch { /* 上报失败不影响请求 */ }
+}
+/** 当前任务是否已被用户停止（无任务上下文时恒为 false，后台进化任务不受影响） */
+export function isAborted() {
+  try { return taskScope.getStore()?.aborted?.() === true; } catch { return false; }
+}
+export const ABORT_ERR = Object.assign(new Error('已停止'), { retryable: false, aborted: true });
+/** 可中断睡眠：每 300ms 检查停止标志，被停止立即抛 ABORT_ERR（等待不再绑架任务） */
+async function abortableSleep(ms) {
+  for (let waited = 0; waited < ms; waited += 300) {
+    if (isAborted()) throw ABORT_ERR;
+    await sleep(Math.min(300, ms - waited));
+  }
+  if (isAborted()) throw ABORT_ERR;
+}
 
 // ── token 用量计量（三层预算 L1任务/L2周期/L3日 的数据源，标签化归集）──
 const usage = { day: dayKey(), tokensIn: 0, tokensOut: 0, calls: 0, errors: 0 };
@@ -52,14 +74,36 @@ function refillTokens(now = Date.now()) {
   }
 }
 export function acquireToken() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (rateLimiter.tokens > 0) {
       rateLimiter.tokens--;
       resolve();
-    } else {
-      rateLimiter.queue.push(resolve);
+      return;
     }
+    // 排队等待超过 2s 时上报（桶空排队可静默数十秒，前端需要知道任务还活着）；
+    // 用户停止任务时立即退出队列（排队不再绑架已停止的任务）
+    const enqueuedAt = Date.now();
+    let settled = false;
+    const wrapped = () => { if (!settled) { settled = true; clearInterval(t); resolve(); } };
+    const t = setInterval(() => {
+      if (settled) { clearInterval(t); return; }
+      if (isAborted()) {
+        settled = true; clearInterval(t);
+        const i = rateLimiter.queue.indexOf(wrapped);
+        if (i >= 0) rateLimiter.queue.splice(i, 1); // 退出队列，避免白白消耗一个令牌
+        reject(ABORT_ERR); return;
+      }
+      if (Date.now() - enqueuedAt >= 2000) {
+        notifyWait({ stage: 'llm_wait', kind: 'queue', position: rateLimiter.queue.indexOf(wrapped) + 1, waitSec: Math.ceil((Date.now() - enqueuedAt) / 1000) });
+      }
+    }, 500);
+    rateLimiter.queue.push(wrapped);
   });
+}
+/** 当前令牌余量（进化钩子让路用：余量不足时跳过低优先级 LLM 调用，把配额留给用户主任务） */
+export function tokensAvailable() {
+  refillTokens();
+  return rateLimiter.tokens;
 }
 function processQueue() {
   while (rateLimiter.queue.length > 0 && rateLimiter.tokens > 0) {
@@ -146,10 +190,14 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
   // 获取令牌（限流）
   await acquireToken();
   let lastErr;
+  let waits429 = 0; // 429 专属耐心额度：不消耗常规重试预算，重新排队等令牌再试
   for (let attempt = 0; attempt <= CONFIG.LLM_MAX_RETRIES; attempt++) {
+    if (isAborted()) throw ABORT_ERR; // 用户已停止：不再发起任何请求
     if (!breakerAllows()) throw new Error('LLM 熔断中（3 分钟），任务排队稍后重试');
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), CONFIG.LLM_TIMEOUT_MS);
+    // 进行中的请求也响应停止：每 500ms 查停止标志，立即掐断 fetch（无需等 60s 超时）
+    const abortWatch = setInterval(() => { if (isAborted()) ac.abort(); }, 500);
     try {
       usage.calls++;
       const res = await fetch(`${eff.baseUrl}/chat/completions`, {
@@ -158,22 +206,39 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
         body: JSON.stringify({ model: eff.model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
         signal: ac.signal,
       });
-      clearTimeout(timer);
-      if (res.status === 429 || res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
+      clearTimeout(timer); clearInterval(abortWatch);
+      if (res.status === 429) {
+        // 服务端限流：按 Retry-After（无头则指数等待 5s→10s→20s→40s→60s）等待 + 重新排队令牌。
+        // 不等待立即重试只会在 1s 内烧光耐心轮（服务端限流窗口通常 ≥30s）。
+        if (waits429 < (CONFIG.LLM_429_MAX_WAITS ?? 5)) {
+          waits429++;
+          const ra = Number(res.headers.get('retry-after') ?? 0);
+          const waitMs = ra > 0 ? Math.min(ra, 60) * 1000 : Math.min(5000 * 2 ** (waits429 - 1), 60_000);
+          notifyWait({ stage: 'llm_wait', kind: 'rate_limit', nth: waits429, max: CONFIG.LLM_429_MAX_WAITS ?? 5, waitSec: Math.round(waitMs / 1000), label });
+          await abortableSleep(waitMs);
+          await acquireToken();
+          attempt--; // 429 不消耗常规重试次数
+          continue;
+        }
+        throw Object.assign(new Error('HTTP 429（限流持续，请稍后重试）'), { retryable: false });
+      }
+      if (res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
       if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`), { retryable: false });
       const data = await res.json();
       breakerRecord(true);
       recordUsage(data?.usage, label);
       return { text: data?.choices?.[0]?.message?.content ?? '', usage: data?.usage };
     } catch (err) {
-      clearTimeout(timer);
+      clearTimeout(timer); clearInterval(abortWatch);
+      if (isAborted()) throw ABORT_ERR; // fetch 被停止信号掐断：直接终止，不进重试
       // 429 属限流预期（已有令牌桶控速 + 指数退避），不计入熔断窗口——否则正常高峰也会误熔断
       if (!String(err.message).startsWith('HTTP 429')) breakerRecord(false);
       usage.errors++;
       lastErr = err;
       const retryable = err.retryable || err.name === 'AbortError' || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT';
       if (!retryable || attempt === CONFIG.LLM_MAX_RETRIES) throw err;
-      await sleep(1000 * 2 ** attempt + Math.random() * 1000); // 指数退避 + 全抖动
+      await acquireToken(); // 常规重试同样过令牌桶：重试风暴是 429 放大的主因
+      await abortableSleep(1000 * 2 ** attempt + Math.random() * 1000); // 指数退避 + 全抖动（可被停止中断）
     }
   }
   throw lastErr;
@@ -200,8 +265,9 @@ export async function chatJson({ messages, validate, temperature = 0.2, label = 
 /**
  * 判定器（§4.2.2）：temperature=0 双采样，结论一致才返回；不一致 → 弃权 { abstain: true }。
  * judgePrompt 不得包含被判定实体的来源信息（判定与利益分离）。
+ * samples=1：低风险判定（任务成败等）单采样省配额；净化类决策保持默认双采样。
  */
-export async function judge({ system, question, options, label = 'judge' }) {
+export async function judge({ system, question, options, label = 'judge', samples = 2 }) {
   if (CONFIG.MOCK) return mockJudge(question, options);
   const ask = async () => {
     const r = await chat({
@@ -215,6 +281,11 @@ export async function judge({ system, question, options, label = 'judge' }) {
     const hit = options.find((o) => text.toUpperCase().includes(o.toUpperCase()));
     return hit ?? 'UNPARSEABLE';
   };
+  if (samples <= 1) {
+    const s1 = await ask();
+    if (s1 !== 'UNPARSEABLE') return { verdict: s1, abstain: false, meta: { model: CONFIG.LLM_MODEL, promptVer: 'v1', sample1: s1, single: true } };
+    return { verdict: null, abstain: true, meta: { model: CONFIG.LLM_MODEL, promptVer: 'v1', sample1: s1, single: true } };
+  }
   const [s1, s2] = await Promise.all([ask(), ask()]);
   const meta = { model: CONFIG.LLM_MODEL, promptVer: 'v1', sample1: s1, sample2: s2 };
   if (s1 === s2 && s1 !== 'UNPARSEABLE') return { verdict: s1, abstain: false, meta };

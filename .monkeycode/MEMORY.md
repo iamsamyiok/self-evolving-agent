@@ -1,0 +1,171 @@
+# User Instruction Memory
+
+This file records user instructions, preferences, and teachings for reference in future interactions.
+
+## Format
+
+### User Instruction Entry
+User instruction entries should follow this format:
+
+[User Instruction Summary]
+- Date: [YYYY-MM-DD]
+- Context: [Mentioned scenario or time]
+- Instructions:
+  - [Content of user teaching or instruction, described line by line]
+
+### Project Knowledge Entry
+Entries discovered by the Agent during task execution should follow this format:
+
+[Project Knowledge Summary]
+- Date: [YYYY-MM-DD]
+- Context: Discovered by Agent while performing [specific task description]
+- Category: [Operations & Deployment|Build Methods|Testing Methods|Troubleshooting & Debugging|Workflow & Collaboration|Environment Configuration]
+- Instructions:
+  - [Specific knowledge points, described line by line]
+
+## Deduplication Strategy
+- Before adding a new entry, check for similar or identical instructions.
+- If a duplicate is found, skip the new entry or merge it with the existing one.
+- When merging, update the context or date information.
+- This helps avoid redundant entries and keeps the memory file tidy.
+
+## Entries
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while fixing persistent 429 + stream interruption complaints
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 429 放大根因：chat() 只在重试循环外取一次令牌——429/5xx 指数退避重试期间不再过令牌桶，重试风暴连环触发 429。修复：每次重试前 acquireToken()；429 走专属耐心轮（LLM_429_MAX_WAITS=5，读 Retry-After，attempt-- 不烧常规预算，耗尽抛"限流持续"清晰报错）
+  - 断流无感恢复三件套：web.js WebServer.liveTasks 静态 Map（taskId→{events,done,result,at}）记录全量进度事件（start 事件也要 push 进 events 保持与流序列下标对齐）；GET /api/task/:id running 时返回 {status:'running',events}、done 时带 result；前端 catch 流错误后 2.5s 轮询，用 handled 计数 slice 补渲染漏掉的事件（renderStage/renderDone 与流路径共用）
+  - 前端不再显示"网络中断"警告，改为 view.set('同步执行进度…') 静默切换轮询
+- Date: 2026-08-24（二轮补丁：界面卡死"恢复连接中"不动作）
+- Instructions:
+  - 卡死根因 1：handleChat catch 分支不设 live.done → 任务失败（429 耗尽抛错）后轮询永远 running。修复：taskId/live 提升到 try 外声明，catch 也写 live.result + live.done=true
+  - 卡死根因 2：前端轮询的 try/catch 包在 while 外，单次轮询网络抖动即整体放弃。修复：catch 移入循环内，失败仅提示"恢复连接中…"继续轮询；8 分钟 deadline 到期渲染"同步超时，可在对话列表查看"
+  - renderDone 载荷双形状：流式 done 事件是 message.content，轮询恢复是 result.answer——必须 q.answer??q.content 兼容，否则流式成功也显示"任务失败：未知"
+  - 429 无 Retry-After 头时必须指数等待（5s→10s→20s→40s→60s）：不等待立即重试会在 1s 内烧光 5 轮耐心（服务端限流窗口≥30s）
+  - 免费配额省钱：judge 加 samples=1 单采样（任务成败判定低风险）；进化钩子令牌让路（tokensAvailable()<6 跳过 LLM 类钩子只记账），否则连续提问时钩子吃光 20/min 配额，用户下一任务直接 429
+- Date: 2026-08-24（三轮：界面"正在思考中"僵死无反馈）
+- Instructions:
+  - 感知层根因：后端任务全 SUCCESS 没卡——卡的是展示。429 耐心轮睡 5s→10s→20s→40s→60s（累计 135s/次）+ 令牌桶排队期间零事件发出，前端标题僵在"正在思考…"（计时器走秒但标题死）
+  - 等待透明化机制：llm-adapter 导出 taskScope（AsyncLocalStorage，node:async_hooks 零依赖）；agent-executor runTask 包 taskScope.run({progress}) 注入闭包；chat() 的 429 等待/排队 >2s 时 notifyWait({stage:'llm_wait',kind,nth,max,waitSec,position}) → onProgress → 流+live.events 双通道 → 前端 renderStage 显示"服务限流，Ns 后自动重试"或"排队等待模型配额"
+  - 事件序列对齐保持：llm_wait 走同一 onProgress 管道，流和轮询自动一致
+  - 进化钩子隔离：_evolveTail 包 taskScope.run({})（空 store），fire-and-forget 不继承任务上下文，避免钩子的等待事件污染已完成任务的 live.events
+  - 验证技巧：单测 acquireToken 排队上报——先同步抽干 20 令牌，第 21 个进队列，等 2.5s 看 progress 收到 kind:queue 事件（注意 --input-type=module 的 -e 里 taskScope.run 回调必须同步返回 promise）
+- Date: 2026-08-24（四轮：仍"正在思考中" + 无法停止/输入锁死）
+- Instructions:
+  - 锁死根因 1：chat.html 响应无 Cache-Control → 浏览器缓存旧版前端，用户跑的是没有 llm_wait 渲染/断流恢复的旧 JS。修复：HTML 响应加 Cache-Control: no-store（前端迭代频繁必须禁缓存）
+  - 锁死根因 2：state.sending=false 在 send() 末尾裸放，任何异常逃逸即永久锁输入。修复：收尾全部包 try/finally；发送中按钮变 ■ 停止键（setSendingUI 切换，不再 disabled）
+  - 停止机制（协作式中断，实测 ~1s 生效）：POST /api/task/:id/abort 置 live.abort=true → submitTask 传 isAborted:()=>live.abort → runTask 放进 taskScope store {progress, aborted} → llm-adapter isAborted() 读。中断点：chat() 每次尝试前/fetch 进行中（500ms watcher ac.abort()）/429 退避 abortableSleep(300ms 粒度)/令牌排队（interval 检查+退出队列防止白耗令牌）/步骤边界/最终综合前
+  - ABORT_ERR = {retryable:false, aborted:true, message:'已停止'}：catch 里 isAborted() 优先判断，防止 fetch 掐断的 AbortError 被当可重试错误重试
+  - 前端停止：activeAC.abort() + POST abort + userStopped 标志（区别断流恢复：停止后不进轮询）；显示"已停止"灰字
+  - 中止任务落库 FAIL/已停止，不 chargeSkills（FAIL 不惩罚技能）
+- Date: 2026-08-24（五轮：前端 TypeError "this.finishLine is not a function" 死循环"恢复连接中"）
+- Instructions:
+  - 事故链：makeExecView 返回对象缺 finishLine 方法（step-block 重构时漏抽），cur()/step() 在 curLine 非空时调 this.finishLine() 必抛 TypeError；第一个 step 事件即崩，掉进断流恢复轮询，轮询里 renderStage 再抛同错 → catch 伪装成"恢复连接中"死循环。后端任务其实正常跑完
+  - 教训：curl 测后端事件流不等于前端渲染路径通过；node --check 只查语法。已建 tests/unit/exec-view.test.js：从 chat.html 切出 makeExecView 源码（顶级函数：indexOf('function makeExecView') 到行首 '\n}'），new Function 注入 mock DOM（createElement/querySelector/appendChild/classList/addEventListener），跑完整事件序列 plan→step→stepDone→…→done 断言不抛错
+  - 渲染容错：流式和轮询两条路径的 renderStage 都包内层 try/catch，单事件渲染失败显示"渲染异常：xxx"并 handled++ 继续补渲染，绝不伪装成网络错误
+  - stepDone 的 lbl 声明必须在 if(curLine) 外（折叠块 html 引用 lbl），行缺失时 lbl='' 回退——块级作用域陷阱
+  - 修改 chat.html 前端渲染后必须跑 exec-view.test.js（node --test tests/unit/exec-view.test.js），再 node --check 提取的 script
+- Date: 2026-08-24（六轮："非法 URL" 降级 → 幻觉新闻）
+- Instructions:
+  - 根因链：planner §6 曾引导"搜索用 http_get" + 技能蒸馏器提示词只允许 tool:http_get → 蒸馏出的 9 个新闻类技能全部固化 http_get+query（无 url）坏用法 → 技能被门禁转 ACTIVE 后每次命中必失败降级 → reason 步骤凭训练数据编造新闻（幻觉）
+  - news_search 工具真实存在（AnySearch API https://api.anysearch.com/v1/search 免Key可用，POST {query,max_results}；降级 Google News RSS）；别名表已映射 search/web_search/google_search 等
+  - 修复四层：planner §5/§6 改为"搜索一律 news_search，http_get 仅限已知完整 URL 的 API"；executeSkillStep 运行时治愈（tool:http_get 无 url 但有 query → 改道 news_search）；蒸馏器注入真实工具清单 + 产出后同样治愈；存量技能 SQL 批量治愈（9 个）
+  - 技能子步骤链式传递：executeSkillStep 的 reason/answer 子步骤必须携带前序 results（工具产出是分析对象，缺失即幻觉）；提示词注明"分析必须基于真实内容禁止编造"
+  - 降级防幻觉：degrade 到 reason 的步骤提示词强制要求"涉及实时/外部信息时声明未经联网核实，禁止编造具体新闻、数字或来源"
+  - http_get 容错：checkPermissions 对含非 ASCII 的 url 自动 encodeURI（中文 URL 不再报非法）
+  - planner 激活版仅 105 字符占位 → prompt() 回退 DEFAULT_PROMPTS（agent-executor.js 内），改默认模板即生效；prompt_registry 表 status 列（非 state）
+- Date: 2026-08-24（七轮：模型不知道"今天"是几号 → "最近一周"算成训练数据的 2026年7月）
+- Instructions:
+  - 时间感知：prompt() 对 planner/step/final 三个 role 注入"当前时间：YYYY年M月D日（周X）HH:MM"+说明"训练数据早于当前时间，相对时间以当前时间为准"。模型上下文没有日期时，所有相对时间（最近/本周/今天）会按训练数据时间换算，产出过时内容
+  - quick 模式实时性守卫：opts.quick 且 input 匹配 /最近|最新|今天|本周|近日|新闻|行情|现价|此刻|now|current|latest|today/i → progress 发 replan(attempt:0, reason:'问题涉及实时信息...') 且 opts={...opts,quick:false} 走完整规划——quick 单次直答无搜索，实时问题直答必幻觉
+  - judge 截断：展示上下文从头300+尾300 放宽到头600+尾500——列表型交付物（多条新闻）条目多，截太狠判定器看不到完整内容会误判 FAIL
+  - 验证要点：回答中出现与当前日期一致的相对时间（如 8月20日）= 时间注入生效；出现训练数据旧日期（如"2026年7月"）= 未生效
+- Date: 2026-08-24（用户指令：移除快速模式 + 界面改亮色）
+- Instructions:
+  - 前端已无快速模式：quickMode checkbox 与传参全部删除，所有对话走完整规划（实时性守卫仍在后端兜底，API 的 quick 参数保留兼容但前端不再传）
+  - chat.html 为亮色 ChatGPT 风格：CSS 变量 --bg:#fff --side:#f9f9f9 --panel:#f4f4f4 --line:#e5e5e5 --txt:#0d0d0d --code:#f6f8fa；代码块浅底深字（code 内联文字 #c7254e，pre 文字 #24292f）；modal 遮罩 rgba(0,0,0,.4)。改样式时勿引入硬编码暗色（#1a1a1a/#111/#262626 等）
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while fixing frequent "网络中断" during long multi-step tasks
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 中断根因：NDJSON 流在进度事件之间静默（LLM 调用 15-60s + 免费限流令牌桶等待），预览代理判定空闲掐断连接；服务端任务仍在跑（轮询恢复能拿到结果即此证据）
+  - 修复：web.js handleChat 加 15s 心跳（`{"type":"ping"}`）+ `X-Accel-Buffering: no`；listen() 设 server.requestTimeout=0、headersTimeout=0、keepAliveTimeout=72s；任务结束 finish() 清心跳再 end
+  - 前端 chat.html 读流循环显式忽略 ping 事件
+  - 关联缺陷：planner 偶发裸用技能名（tool:ai_news_summary_pipeline 漏 skill: 前缀）→ R5 拦截降级；planOnce 泛化重写顺序改为：未注册名先查技能池 active().find(name) → 再走 ALIASES 别名表
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while solving memory-scale retrieval slowdown systematically
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 检索缓存架构：core/retrieval-cache.js EntityIndex —— 快照校验（COUNT+SUM(version)+MAX(updated_at) 单条聚合 SQL）+ 增量 diff 同步（只重分词变更条目）+ 冷热裁剪（超 MEMORY_INDEX_MAX_ROWS=20000 按温度=质量0.5+重要性0.2+时近性0.3 保留最热）
+  - 记账旁路：store.touch（access_count/last_used_at）与 store.bumpStats（成功/失败/执行计数、质量分）直写 SQL，不递增 version/updated_at —— 每次任务后的检索记账/技能执行记账不触发索引重建；真实内容/状态变更仍走 store.update 正常失效
+  - BM25 倒排化：utils/similarity.js BM25Index 加 postings（token→Set<id>），search 只对与查询共享 token 的文档打分（O(命中集)）；同时修复原 add() 每次全量重算 avgLen 的 O(N²) 构造缺陷
+  - 三系统接入：memory/skill/experience 的 retrieve/findDuplicate/findSimilar/active() 全部走缓存索引；行查找用 Map.get 替代 O(N) 的 Array.find
+  - 性能基线（5k 记忆压测，tests/unit/retrieval-perf.test.js）：首建 ~200ms、热检索 ~35ms/次、单条增量同步 <50ms；旧实现每次检索全量重建（150ms+）
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while adding share/export-import, ChatGPT-style UI, and no-tool capability expansion
+- Category: Operations & Deployment
+- Instructions:
+  - 能力分享端点：`GET /api/share/export`（返回 `{format:'evo-agent-share',version:1,items:[{type,score,...}]}`）；`POST /api/share/import` 接收同名包（skill 入库 DRAFT 须过黄金门禁，memory/experience 去重后 ACTIVE，重复跳过）
+  - chat.html 路由为 `/`（不是 `/chat.html`）；web.js 在 `web/chat.html` 读取并返回，HTML 修改无需重启服务
+  - web.js 含 share 端点时需重启生效（HTML 是每次读文件，JS 是启动时加载）
+  - 当前活跃 backend terminal：term_1787559885805_29（PID 11616）运行 node web.js
+- Instructions:
+  - 断线重连链路：start 事件携带 taskId → 前端流中断后轮询 GET /api/task/:id（执行中返回 pending，落库后返回结果）
+  - run_js 沙箱：vm + 黑名单（require/process/Function/eval/fetch/constructor/prototype 等）+ 3s 超时；死循环被超时拦截不 crash
+  - judge 判定标准是"最终交付物"而非过程展示；简短答案 abstain 宽容线为 8 字符
+  - 记忆入库门槛 MEMORY_MIN_IMPORTANCE=0.55，quality_score 按重要性初始化；抽取 prompt 含正反例禁止任务复述
+  - REPLAN_MAX=2，每次 replan 前有 labelBudgetLeft>10_000 预算守卫
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while adding resilience execution kernel (degrade/replan/params-fix)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 韧性执行链：工具失败 → fixToolParams（LLM 修参数一次）→ 降级 reason（degradeNote 注入）→ 任务级 replan（带错误教训重规划）
+  - infra 错误（/熔断|429|预算|store_closed/）不降级不上抛重规划，直接失败
+  - tools/ 目录为热插拔工具位：default 导出 {name,desc,risk,checkPermissions,run}，启动时 loadDynamicTools 自动注册
+  - calc 工具含幂的纯整数表达式走 BigInt 路径（2^64 精确），小数/函数走 double
+  - 进度事件流：step（开始）/ step_done（ms+preview）/ retry / degrade / replan，前端 chat.html 按事件渲染打勾与耗时
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while adding share/export-import, ChatGPT-style UI, and no-tool capability expansion
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 无工具能力拓展：planner prompt §5 给出公开免 Key API 优先级（open-meteo 天气 / open.er-api.com 汇率 / github.com 占位），缺专用工具时按 http_get → run_js 代码实现 → reason 自身知识 三级降级，不可放弃
+  - 技能参数模板插值：agent-executor.js `interpolateParams()` 支持 `{{key}}` 和 `{key}` 占位符替换；executeSkillStep 合并时子步骤默认值 ← 用户传入参数（用户覆盖默认值）
+  - get_weather 技能 URL 是 `https://wttr.in/{city}?format=j1`，不插值会拿到 wttr.in 默认位置（悉尼）——修复后东京查询返回真实数据
+  - skills 表 NOT NULL 列：state/origin/created_at/updated_at/immunity_until/name/scenario/description/steps；新增测试插入须补齐所有非空列
+  - 分享包格式字段：items 中 skill 需 scene/desc/steps/success_count/fail_count/heat；memory/experience 含 content/quality_score/task_signature
+- Instructions:
+  - Web 服务启动：`node web.js`（长驻任务须用 background_terminal 且 timeout=0；chat 端口 3789，dashboard 端口 3790）
+  - LLM 免费限流约 20 req/min；令牌桶在 core/llm-adapter.js（20 桶容，1/3s 补充）；429 已豁免熔断窗口
+  - 连续真实 LLM 测试之间须 sleep 15-25s 避免触发熔断（70% 错误率或连续 10 失败 → 3 分钟冷却）
+  - 测试时注意：用户浏览器可能开着 web 前端并发发任务，tasks 表最新记录可能不是自己的测试任务
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while fixing test suite hangs
+- Category: Testing Methods
+- Instructions:
+  - 测试命令：`node --test tests/unit/*.test.js`（shell glob 形式；目录参数形式不工作）
+  - 模块级 setInterval 必须 `.unref?.()`，否则 node --test 进程挂起超时（曾因 llm-adapter 限流定时器缺 unref 导致全套测试挂死）
+  - 起服务器的测试须在 test.after 中关闭 server 与 store（web-chat.test.js 曾缺失导致挂起）
+  - `node --check` 按 CJS 解析，无法可靠发现 ESM 语法错误；用 `node core/xxx.js` 直接执行可拿到精确行号
+
+[Project Knowledge Summary]
+- Date: 2026-08-24
+- Context: Discovered by Agent while fixing constitution mismatch warning
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 改动 core/safety-constitution.js 后启动会报 constitution_mismatch（运行时防篡改哈希）；合法迭代后须用 node 脚本重登记 `constitution_sha`（store.setState）
+  - store 关闭后统一抛 `store_closed`（store-base.js 的 db getter 守卫）；上层捕获该错误应静默

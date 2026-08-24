@@ -5,22 +5,29 @@ import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, jaccard, tokenize } from '../utils/similarity.js';
 import { qualityScore, hysteresis, wilsonLowerBound, recencyScore } from '../utils/stats.js';
 import { chatJson } from './llm-adapter.js';
+import { EntityIndex } from './retrieval-cache.js';
 
 export class SkillSystem {
   constructor(store = new Store(), executor = null) {
     this.store = store;
     this.executor = executor; // 延迟注入，避免循环依赖（agent-executor 需要 SkillSystem）
+    this.idx = new EntityIndex(store, 'skill', (s) => `${s.name} ${s.scenario} ${s.description}`, {
+      where: "WHERE state IN ('ACTIVE','COOLING')",
+    });
   }
 
-  active() { return this.store.list('skill', "WHERE state IN ('ACTIVE','COOLING')"); }
+  active() { return [...this.idx.rows.values()]; }
   drafts() { return this.store.list('skill', "WHERE state = 'DRAFT'"); }
 
   /** 任务成功后提炼技能候选（冷启动：技能池为空属正常态，§5.1.5） */
   async distillFromTrace(trace) {
     if (!trace?.input) return null;
     // 失败任务也提炼（失败模式可复用）
+    // 工具白名单与运行时注册表同源（含 news_search 等），蒸馏出的技能步骤才不会固化不存在的工具用法
+    const registry = this.executor?.tools?.tools;
+    const toolList = registry ? [...registry.keys()].filter((n) => n !== 'shell').join(' | ') : 'news_search';
     const prompt = [
-      { role: 'system', content: '你是技能提炼器。判断该任务是否有可复用的成套做法。若有，输出 JSON：{"name":"snake_case名","scenario":"适用场景","description":"功能说明","steps":[{"goal":"...","action":"reason|answer|tool:http_get","params":{},"expected":"..."}]}；没有则输出 {"name":null}。' },
+      { role: 'system', content: `你是技能提炼器。判断该任务是否有可复用的成套做法。若有，输出 JSON：{"name":"snake_case名","scenario":"适用场景","description":"功能说明","steps":[{"goal":"...","action":"reason|answer|tool:<下列工具名之一>","params":{},"expected":"..."}]}；没有则输出 {"name":null}。\n可用工具：${toolList}\n规则：搜索/新闻/实时信息类步骤必须用 tool:news_search（参数 query）；http_get 仅用于完整 URL 的公开 API 调用；禁止使用清单外的工具名。` },
       { role: 'user', content: `任务：${trace.input}\n结果：${trace.outcome}\n执行步骤：${JSON.stringify((trace.steps ?? []).map((s) => ({ goal: s.goal, output: (s.output || '').slice(0, 100) })).slice(0, 8))}\n${trace.error ? '错误：' + trace.error.slice(0, 200) : ''}\n回答摘要：${(trace.answer ?? '').slice(0, 300)}` },
     ];
     const out = await chatJson({
@@ -31,6 +38,14 @@ export class SkillSystem {
       label: 'skill-distill',
     });
     if (!out?.name) return null;
+
+    // 蒸馏治愈：LLM 仍可能产出 http_get+query（无 url）的坏步骤——改道 news_search，防止失败用法固化进技能
+    for (const s of out.steps) {
+      if (s?.action === 'tool:http_get' && s.params && !s.params.url) {
+        const q = s.params.query ?? s.params.keyword ?? s.params.search_query ?? s.params.q ?? s.params.topic;
+        if (q) { s.action = 'tool:news_search'; s.params = { query: String(q), maxResults: s.params.max_results ?? 8 }; }
+      }
+    }
 
     // 墓碑检查：与被硬清除内容高度相似 → 禁止直接再生（§6.5-3，反振荡）
     const tombHit = this.checkTombstones(`${out.name} ${out.scenario} ${out.description}`);
@@ -134,13 +149,14 @@ export class SkillSystem {
     if (s.state === 'ACTIVE') {
       const band = hysteresis(q, { promote: CONFIG.SKILL_PROMOTE_W, demote: CONFIG.SKILL_DEMOTE_W, purge: CONFIG.SKILL_PURGE_W });
       if (n >= 5 && w >= CONFIG.SKILL_PROMOTE_W && this.hitsInDays(skillId, 7) >= 5) fields.heat = 'hot';
-      else if (band === 'demote') { this.store.update('skill', skillId, fields); this.store.transition('skill', skillId, 'COOLING'); return; }
+      else if (band === 'demote') { this.store.bumpStats('skill', skillId, fields); this.store.transition('skill', skillId, 'COOLING'); return; }
       else if (s.heat === 'hot' && this.hitsInDays(skillId, 7) < 5) fields.heat = 'warm';
     } else if (s.state === 'COOLING') {
       const band = hysteresis(q, { promote: CONFIG.SKILL_PROMOTE_W, demote: CONFIG.SKILL_DEMOTE_W, purge: CONFIG.SKILL_PURGE_W });
-      if (band === 'promote') { this.store.update('skill', skillId, fields); this.store.transition('skill', skillId, 'ACTIVE'); return; }
+      if (band === 'promote') { this.store.bumpStats('skill', skillId, fields); this.store.transition('skill', skillId, 'ACTIVE'); return; }
     }
-    this.store.update('skill', skillId, fields);
+    // 统计记账走 bumpStats 直写：每次任务后的执行记账不触发检索索引重建
+    this.store.bumpStats('skill', skillId, fields);
   }
 
   hitsInDays(skillId, days) {
@@ -152,17 +168,19 @@ export class SkillSystem {
     return Math.round(ratePerDay * days);
   }
 
-  /** 检索：供 L6 上下文装配（权重可调参，默认 §3.4-4） */
+  /** 检索：供 L6 上下文装配（权重可调参，默认 §3.4-4）；走缓存索引，cold 热度条目过滤 */
   retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
-    const actives = this.active().filter((s) => s.heat !== 'cold');
-    if (!actives.length) return [];
-    const idx = new BM25Index(actives.map((s) => ({ id: s.id, text: `${s.name} ${s.scenario} ${s.description}` })));
-    const hits = idx.search(query, topK);
+    const hits = this.idx.index.search(query, topK * 2);
     const now = Date.now();
-    return hits.map((h) => {
-      const row = actives.find((s) => s.id === h.id);
+    const out = [];
+    for (const h of hits) {
+      const row = this.idx.rows.get(h.id);
+      if (!row || row.heat === 'cold') continue;
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
-      return { row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * (Number.isFinite(rec) ? rec : 0) };
-    }).filter((x) => x.score > 0.1);
+      const score = weights.sim * h.score + weights.quality * row.quality_score + weights.recency * (Number.isFinite(rec) ? rec : 0);
+      if (score > 0.1) out.push({ row, score });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, topK);
   }
 }

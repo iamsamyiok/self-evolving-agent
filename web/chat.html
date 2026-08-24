@@ -3,7 +3,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>evo-agent · 自进化智能体</title>
 <style>
-:root{--bg:#212121;--side:#171717;--panel:#2f2f2f;--line:#3a3a3a;--txt:#ececec;--dim:#9b9b9b;--acc:#10a37f;--ok:#10a37f;--bad:#ef4444;--warn:#d29922;--chip:#1f1f1f;--userbub:#2f2f2f}
+:root{--bg:#ffffff;--side:#f9f9f9;--panel:#f4f4f4;--line:#e5e5e5;--txt:#0d0d0d;--dim:#8f8f8f;--acc:#10a37f;--ok:#10a37f;--bad:#ef4444;--warn:#b45309;--chip:#f7f7f8;--userbub:#f4f4f4;--code:#f6f8fa}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--txt);height:100vh;overflow:hidden}
 #app{display:flex;height:100vh}
@@ -21,6 +21,24 @@ aside.side.collapsed{margin-left:-260px}
 .conv .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conv .del{visibility:hidden;color:var(--dim);border:none;background:none;cursor:pointer;font-size:12px}
 .conv:hover .del{visibility:visible}
+/* 侧栏选中模式工具栏 */
+.conv-toolbar{display:none;padding:4px 8px 2px;gap:4px}
+.conv-toolbar.active{display:flex}
+.conv-toolbar button{font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--txt);cursor:pointer}
+.conv-toolbar button:hover{border-color:var(--acc);color:var(--acc)}
+.conv-toolbar button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+.conv-toolbar button.primary:hover{filter:brightness(1.1)}
+.conv input[type=checkbox]{accent-color:var(--acc);cursor:pointer}
+/* 右键菜单 */
+.ctx-menu{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 0;min-width:160px;z-index:200;box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.ctx-menu button{display:block;width:100%;text-align:left;padding:6px 14px;border:none;background:none;color:var(--txt);font-size:13px;cursor:pointer;white-space:nowrap}
+.ctx-menu button:hover{background:var(--chip)}
+.ctx-menu button.danger{color:var(--bad)}
+.ctx-menu button.danger:hover{background:rgba(239,68,68,.1)}
+.ctx-sep{height:1px;background:var(--line);margin:4px 0}
+.conv.selected{outline:2px solid var(--acc);outline-offset:-2px}
+/* 重命名输入框 */
+.conv .rename-input{flex:1;background:transparent;border:1px solid var(--acc);border-radius:4px;color:var(--txt);padding:1px 4px;font-size:13px;outline:none}
 .side-foot{border-top:1px solid var(--line);padding:8px 12px;display:flex;flex-direction:column;gap:4px}
 .side-foot button{background:none;color:var(--txt);border:none;border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px}
 .side-foot button:hover{background:var(--panel)}
@@ -34,7 +52,6 @@ header{display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:
 header h1{font-size:15px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pill{font-size:11px;padding:3px 10px;border-radius:12px;background:var(--chip);border:1px solid var(--line);color:var(--dim)}
 .pill b{color:var(--acc)}
-label.sw{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);cursor:pointer}
 #messages{flex:1;overflow-y:auto;padding:24px 8px 8px}
 .wrap{max-width:760px;margin:0 auto;padding:0 16px}
 .msg{margin-bottom:26px;animation:fade .25s}
@@ -46,15 +63,17 @@ label.sw{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)
 .ai-av{width:28px;height:28px;border-radius:50%;background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;margin-top:2px}
 .msg.ai .body{flex:1;min-width:0}
 .msg.ai .bub{font-size:15px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
-.msg.ai .bub code{background:#1a1a1a;padding:1px 6px;border-radius:5px;font-family:Consolas,monospace;font-size:13px}
-.msg.ai .bub pre{background:#1a1a1a;border:1px solid var(--line);border-radius:10px;padding:12px;overflow-x:auto;margin:8px 0;white-space:pre;font-size:13px}
+.msg.ai .bub code{background:var(--code);padding:1px 6px;border-radius:5px;font-family:Consolas,monospace;font-size:13px;color:#c7254e}
+.msg.ai .bub pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:12px;overflow-x:auto;margin:8px 0;white-space:pre;font-size:13px;color:#24292f}
 /* 执行过程卡片：可折叠实时动作区 */
 .exec{background:var(--chip);border:1px solid var(--line);border-radius:12px;margin-bottom:10px;overflow:hidden}
 .exec-h{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:12px;color:var(--dim);cursor:pointer;user-select:none}
 .exec-h .dot{width:7px;height:7px;border-radius:50%;background:var(--warn);animation:pulse 1.2s infinite}
 .exec.done .exec-h .dot{background:var(--ok);animation:none}
+.exec.collapsed .exec-h .arrow{transform:rotate(-90deg)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .exec-b{padding:2px 12px 10px;font-size:12px;color:var(--dim);line-height:2}
+.exec.collapsed .exec-b{display:none}
 .exec-b .ln{display:flex;gap:6px;align-items:baseline}
 .exec-b .ln.done{color:#6b7f74}
 .exec-b .ln.cur{color:var(--txt)}
@@ -62,18 +81,32 @@ label.sw{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)
 .exec-b .ln .spin{display:inline-block;animation:pulse 1s infinite;color:var(--acc)}
 .exec-b .prev{color:#7a7a7a;font-size:11px;margin-left:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:92%;display:block}
 .exec-b .warn-ln{color:var(--warn)}
-.exec-b .timer{margin-left:auto;font-size:11px;color:#6b6b6b;font-variant-numeric:tabular-nums}
+.exec-b .timer{margin-left:auto;font-size:11px;color:#9b9b9b;font-variant-numeric:tabular-nums}
+/* 步骤内容折叠块 */
+.step-block{border-top:1px solid var(--line);margin:4px 0 0}
+.step-head{display:flex;align-items:center;gap:6px;padding:5px 2px;font-size:12px;color:var(--txt);cursor:pointer;user-select:none}
+.step-head:hover{color:var(--acc)}
+.step-head .arrow{font-size:10px;color:var(--dim);transition:transform .15s;flex-shrink:0}
+.step-head .snum{font-size:11px;color:var(--dim);flex-shrink:0}
+.step-head .sgoal{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step-head .sstatus{font-size:11px;flex-shrink:0}
+.step-body{padding:4px 8px 8px 22px;font-size:12px;color:var(--dim);line-height:1.75;white-space:pre-wrap;word-break:break-word;display:none;max-height:480px;overflow-y:auto;background:rgba(0,0,0,.04);border-radius:6px;margin:2px 0}
+.step-body.open{display:block}
+.step-body code{background:var(--code);padding:1px 5px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;color:#c7254e}
+.step-body pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:10px;overflow-x:auto;margin:6px 0;white-space:pre;font-size:11px;color:#24292f}
+.step-body pre code{background:transparent;padding:0}
 .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
 .chip{font-size:11px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:2px 9px;color:var(--dim);cursor:help}
 .chip.ok{color:var(--ok)}.chip.bad{color:var(--bad)}
 .err{color:var(--bad);font-size:14px}
 /* 输入区：ChatGPT 式大圆角输入框 + 圆形发送 */
 footer{padding:8px 16px 16px;background:var(--bg)}
-.inbox{max-width:760px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;background:var(--panel);border:1px solid var(--line);border-radius:26px;padding:12px 14px;box-shadow:0 2px 12px rgba(0,0,0,.25)}
-.inbox:focus-within{border-color:#5a5a5a}
+.inbox{max-width:760px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;background:#fff;border:1px solid var(--line);border-radius:26px;padding:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.inbox:focus-within{border-color:#c5c5d2}
 textarea{flex:1;background:none;border:none;color:var(--txt);font-size:15px;font-family:inherit;resize:none;outline:none;max-height:180px;line-height:1.55}
 #sendBtn{width:34px;height:34px;border-radius:50%;border:none;background:var(--acc);color:#fff;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s}
 #sendBtn:disabled{opacity:.35;cursor:default}
+#sendBtn.stop{background:#666;font-size:12px}
 #sendBtn:not(:disabled):hover{filter:brightness(1.15)}
 .hint{max-width:760px;margin:6px auto 0;text-align:center;font-size:11px;color:var(--dim)}
 /* 欢迎页 */
@@ -94,42 +127,49 @@ aside.evo h3:first-child{margin-top:0}
 .evo .big small{font-size:12px;color:var(--dim);font-weight:400}
 .spark{display:flex;align-items:flex-end;gap:2px;height:36px;margin:6px 0}
 .spark i{flex:1;background:var(--acc);min-height:2px;border-radius:1px}
-.row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid #262626}
+.row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid #ececec}
 .row b{color:var(--txt)}
 .feed{font-size:11px;color:var(--dim);line-height:1.8}
-.feed div{border-bottom:1px dashed #262626;padding:3px 0}
+.feed div{border-bottom:1px dashed #ececec;padding:3px 0}
 .note{font-size:11px;color:var(--dim);background:var(--chip);border-radius:10px;padding:9px;line-height:1.7}
 .sharebox{display:flex;gap:6px;margin-top:8px}
 .sharebox button{flex:1;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--txt);cursor:pointer;font-size:12px}
 .sharebox button:hover{border-color:var(--acc)}
 /* ── 弹窗（配置/导入）── */
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:50}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;z-index:50}
 .modal.open{display:flex}
-.mbox{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;width:440px;max-height:85vh;overflow-y:auto}
+.mbox{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;width:440px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.12)}
 .mbox h2{font-size:16px;margin-bottom:4px}
 .mbox p.sub{font-size:12px;color:var(--dim);margin-bottom:16px}
 .mbox label{display:block;font-size:12px;color:var(--dim);margin:12px 0 4px}
-.mbox input,.mbox textarea{width:100%;background:#141414;border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:9px;font-size:13px}
+.mbox input,.mbox textarea{width:100%;background:#fff;border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:9px;font-size:13px}
 .mbox textarea{min-height:120px;resize:vertical;font-family:Consolas,monospace;font-size:11px}
 .mbtns{display:flex;gap:8px;margin-top:18px}
 .mbtns button{flex:1;padding:9px;border-radius:10px;border:1px solid var(--line);background:var(--chip);color:var(--txt);cursor:pointer;font-size:13px}
 .mbtns button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 .mbtns button.primary:hover{filter:brightness(1.1)}
-.mbtns button:hover{border-color:#5a5a5a}
+.mbtns button:hover{border-color:#c5c5d2}
 #cfgTestRes,#impRes{font-size:12px;margin-top:10px;min-height:16px;line-height:1.6}
 #cfgTestRes.ok,#impRes.ok{color:var(--ok)}#cfgTestRes.bad,#impRes.bad{color:var(--bad)}
-::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:4px}
-::-webkit-scrollbar-thumb:hover{background:#4a4a4a}
+::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#d9d9e3;border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:#b9b9c7}
 </style></head><body>
 <div id="app">
   <aside class="side" id="sidebar">
     <div class="brand">♻ evo-agent<small>自进化智能体 · 越用越准</small></div>
     <button class="newchat" onclick="newConv()">✏ 新对话</button>
     <div id="convs"></div>
+    <div class="conv-toolbar" id="convToolbar">
+      <span style="font-size:11px;color:var(--dim);flex:1" id="selCount">已选 0 项</span>
+      <button onclick="batchDeleteSelected()">删除所选</button>
+      <button onclick="deleteAllConvs()" style="color:var(--bad)">全部删除</button>
+      <button onclick="toggleSelMode()">取消</button>
+    </div>
     <div class="side-foot">
       <div id="llmPill">检查配置中…</div>
       <button onclick="openEvo()">📈 进化面板</button>
       <button onclick="openCfg()">⚙ LLM 配置</button>
+      <button onclick="toggleSelMode()" title="批量管理对话" style="font-size:11px;padding:2px 8px">批量管理</button>
     </div>
   </aside>
 
@@ -138,15 +178,8 @@ aside.evo h3:first-child{margin-top:0}
       <button id="sidebarToggle" onclick="toggleSidebar()" title="侧栏">☰</button>
       <h1 id="convTitle">新对话</h1>
       <span class="pill" id="evoPill" onclick="openEvo()" style="cursor:pointer">技能 <b>0</b> · 记忆 <b>0</b> · 经验 <b>0</b></span>
-      <label class="sw"><input type="checkbox" id="quickMode"> ⚡快速</label>
     </header>
     <div id="messages"><div class="wrap" id="msgWrap">
-      <div id="welcome">
-        <div class="logo">♻</div>
-        <h2>有什么可以帮忙？</h2>
-        <p>每轮对话自动沉淀技能 / 记忆 / 经验，能力持续积累</p>
-        <div class="exps" id="exps"></div>
-      </div>
     </div></div>
     <footer>
       <div class="inbox">
@@ -169,6 +202,18 @@ aside.evo h3:first-child{margin-top:0}
       <input id="cfgKey" type="password" placeholder="sk-…（留空保持不变）">
       <label>模型</label>
       <input id="cfgModel" placeholder="deepseek-chat">
+      <div style="border-top:1px solid var(--line);margin:16px 0"></div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">工具箱（按需开启子功能，关闭后规划器不再分配对应工具）</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:6px 0">
+        <input type="checkbox" id="tbRuntime" onchange="_toolbox.runtime=this.checked"> 计算/代码执行（calc、run_js）
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:6px 0">
+        <input type="checkbox" id="tbNetwork" onchange="_toolbox.network=this.checked"> 联网搜索（http_get）
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:6px 0">
+        <input type="checkbox" id="tbFileio" onchange="_toolbox.fileio=this.checked"> 沙箱文件读写（fs_read/write/list）
+      </label>
+      <div id="toolTipBox" style="font-size:12px;color:var(--dim);margin:6px 0 2px"></div>
       <div class="mbtns">
         <button onclick="testCfg()">测试连接</button>
         <button class="primary" onclick="saveCfg()">保存并启用</button>
@@ -198,13 +243,6 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state={convs:[],convId:null,sending:false,evoOpen:false};
 
-const EXAMPLES=[
-  ['搜索最近的 AI 新闻并总结','联网获取实时信息'],
-  ['计算 (1+0.06)^20 * 50000 复利终值','精确计算 + 代码验证'],
-  ['今天记住：项目用 Node 22 部署','写入记忆，越用越准'],
-  ['帮我调研一个技术选型问题','多步任务 · 全程进度可见'],
-];
-
 /* ── markdown-lite ── */
 function md(s){
   s=esc(s);
@@ -218,7 +256,6 @@ function md(s){
 
 /* ── 初始化 ── */
 async function init(){
-  $('exps').innerHTML=EXAMPLES.map((e,i)=>`<button class="exp" onclick="useExample(${i})">${esc(e[0])}<small>${esc(e[1])}</small></button>`).join('');
   await refreshConvs();
   await refreshLlmPill();
   setInterval(refreshEvoPill,5000);
@@ -232,8 +269,57 @@ async function init(){
 async function refreshConvs(){
   state.convs=await (await fetch('/api/conversations')).json();
   $('convs').innerHTML=state.convs.map(c=>
-    `<div class="conv ${c.id===state.convId?'on':''}" onclick="loadConv('${c.id}')"><span class="t" title="${esc(c.title)}">${esc(c.title)}</span><button class="del" onclick="event.stopPropagation();delConv('${c.id}')">✕</button></div>`
+    `<div class="conv ${c.id===state.convId?'on':''}" data-conv-id="${c.id}" onclick="loadConv('${c.id}');if(selMode){event.stopPropagation();toggleConvSel('${c.id}')"}">
+      ${selMode?`<input type="checkbox" ${selectedConvs.has(c.id)?'checked':''} onclick="event.stopPropagation();toggleConvSel('${c.id}')">`:''}
+      <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+      ${!selMode?`<button class="del" onclick="event.stopPropagation();delConv('${c.id}')" title="删除">✕</button>`:''}
+    </div>`
   ).join('')||'<div style="color:var(--dim);font-size:12px;padding:12px">暂无对话</div>';
+  updateSelCount();
+}
+
+let selMode = false, selectedConvs = new Set();
+
+function toggleSelMode() {
+  selMode = !selMode;
+  selectedConvs.clear();
+  document.querySelector('.conv-toolbar')?.classList.toggle('active', selMode);
+  document.querySelectorAll('.conv').forEach(el => {
+    el.classList.toggle('selected', false);
+    const cb = el.querySelector('input[type=checkbox]');
+    if (cb) cb.checked = false;
+  });
+  refreshConvs();
+}
+
+function toggleConvSel(id) {
+  if (selectedConvs.has(id)) selectedConvs.delete(id);
+  else selectedConvs.add(id);
+  refreshConvs();
+}
+
+function updateSelCount() {
+  $('selCount').textContent = `已选 ${selectedConvs.size} 项`;
+}
+
+async function batchDeleteSelected() {
+  if (!selectedConvs.size) return;
+  if (!confirm(`确定删除 ${selectedConvs.size} 个对话？`)) return;
+  const ids = [...selectedConvs];
+  await fetch('/api/conversations', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
+  selectedConvs.clear();
+  toggleSelMode();
+  refreshConvs();
+}
+
+async function deleteAllConvs() {
+  if (!confirm('确定删除所有对话？此操作不可恢复。')) return;
+  const all = state.convs.map(c => c.id);
+  if (!all.length) return;
+  await fetch('/api/conversations', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids: all})});
+  selectedConvs.clear();
+  toggleSelMode();
+  if (state.convId) newConv(); else refreshConvs();
 }
 async function refreshLlmPill(){
   const c=await (await fetch('/api/config')).json();
@@ -256,7 +342,6 @@ async function loadConv(id){
   refreshConvs();
 }
 async function delConv(id){await fetch(`/api/conversations/${id}`,{method:'DELETE'});if(state.convId===id)newConv();else refreshConvs();}
-function useExample(i){$('ta').value=EXAMPLES[i][0];doSend();}
 function closeModal(id){$(id).classList.remove('open');}
 
 /* ── 消息渲染 ── */
@@ -288,48 +373,106 @@ function aiHtml(thinking,content,meta){
   return `${exec}<div class="bub">${body}</div>${chips?`<div class="meta">${chips}</div>`:''}`;
 }
 
-/* ── 实时执行渲染器：行级 DOM 增量更新（当前动作高亮 + 跳动计时）── */
+/* ── 实时执行渲染器：行级 DOM 增量更新 + 每步内容折叠展示 ── */
 function makeExecView(container){
-  container.innerHTML=`<div class="exec"><div class="exec-h"><span class="dot"></span><span class="exec-title">正在思考…</span><span class="timer"></span></div><div class="exec-b" style="display:none"></div></div>`;
+  container.innerHTML=`<div class="exec"><div class="exec-h"><span class="arrow">▾</span><span class="dot"></span><span class="exec-title">正在思考…</span><span class="timer"></span></div><div class="exec-b" style="display:none"></div></div>`;
   const box=container.querySelector('.exec'),body=container.querySelector('.exec-b'),
         title=container.querySelector('.exec-title'),timerEl=container.querySelector('.timer');
-  let curLine=null,curStart=0,timerId=null,elapsed=0;
+  let curLine=null,curStart=0,timerId=null,elapsed=0,stepIdx=0;
   const scrollTop=()=>{const m=$('messages');m.scrollTop=m.scrollHeight;};
   const startTimer=()=>{curStart=Date.now();timerId=setInterval(()=>{timerEl.textContent=((Date.now()-curStart)/1000).toFixed(0)+'s';},500);};
   const stopTimer=()=>{if(timerId){clearInterval(timerId);timerId='';}timerEl.textContent=elapsed?((elapsed/1000).toFixed(1)+'s'):'';};
+  box.querySelector('.exec-h').addEventListener('click',()=>box.classList.toggle('collapsed'));
   return {
     set(t){title.textContent=t;},
     plan(steps){
-      body.style.display='';
-      const d=document.createElement('div');d.className='ln';d.innerHTML=`<span class="tick">🧭</span><span>规划：${esc(steps.map(s=>String(s).slice(0,26)).join(' → '))}</span>`;
-      body.appendChild(d);this.cur("执行中…");scrollTop();
-    },
+       body.style.display='';
+       const d=document.createElement('div');d.className='ln';d.innerHTML=`<span class="tick">◇</span><span>规划：${esc(steps.map(s=>String(s).slice(0,26)).join(' → '))}</span>`;
+       body.appendChild(d);this.cur("执行中…");scrollTop();
+     },
     cur(label){
       if(curLine){this.finishLine();}
       const d=document.createElement('div');d.className='ln cur';d.id='curln';
       d.innerHTML=`<span class="spin">●</span><span>${esc(label)}</span>`;
       body.appendChild(d);curLine=d;startTimer();scrollTop();
     },
-    finishLine(preview){
+    step(step){
+      if(curLine){this.finishLine();}
+      const idx=(step.idx??1);
+      this.cur(`步骤 ${idx}/${step.total||'?'}：${step.goal}`);
+    },
+    stepDone(result){
+      let lbl='';
+      if(curLine){ // 行存在才完成行；行缺失（时序异常）也照常建折叠块，输出不丢
+        curLine.className='ln done';
+        lbl=curLine.querySelector('span:last-child').textContent;
+        curLine.innerHTML=`<span class="tick">✓</span><span>${esc(lbl)}</span>`;
+        curLine=null;if(timerId){clearInterval(timerId);timerId=null;}
+      }
+      // 创建折叠块
+      const block=document.createElement('div');block.className='step-block';
+      const outText=(result?.output||'').trim()||'（无输出）';
+      const escapedOut=esc(outText.slice(0,8000));
+      // 简单 md 格式化
+      const htmlOut=escapedOut
+        .replace(/```(\w*)\n?([\s\S]*?)```/g,'<pre><code>$2</code></pre>')
+        .replace(/`([^`\n]+)`/g,'<code>$1</code>')
+        .replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>')
+        .replace(/\n/g,'<br>');
+      block.innerHTML=`
+        <div class="step-head"><span class="arrow">▸</span><span class="snum">#${stepIdx+1}</span><span class="sgoal">${esc((result?.goal||lbl).slice(0,80))}</span><span class="sstatus" style="color:var(--dim)">展开</span></div>
+        <div class="step-body">${htmlOut}</div>`;
+      block.querySelector('.step-head').addEventListener('click',e=>{
+        if(e.target.closest('.step-body'))return;
+        const b=block.querySelector('.step-body');
+        const open=b.classList.toggle('open');
+        block.querySelector('.arrow').textContent=open?'▾':'▸';
+        block.querySelector('.sstatus').textContent=open?'收起':'展开';
+        block.querySelector('.sstatus').style.color=open?'var(--acc)':'var(--dim)';
+      });
+      const hdr=body.parentElement.querySelector('.exec-h');
+      hdr.insertAdjacentElement('afterend',block);
+      stepIdx++;
+      scrollTop();
+    },
+    finishLine(){ // 完成当前行（cur/step 切换时调用；与 stepDone 的行完成逻辑一致，但不建折叠块）
       if(!curLine)return;
       curLine.className='ln done';
       const lbl=curLine.querySelector('span:last-child').textContent;
       curLine.innerHTML=`<span class="tick">✓</span><span>${esc(lbl)}</span>`;
-      if(preview){const p=document.createElement('span');p.className='prev';p.textContent=preview+' …';body.appendChild(p);}
       curLine=null;if(timerId){clearInterval(timerId);timerId=null;}
     },
     warn(t){const d=document.createElement('div');d.className='ln warn-ln';d.innerHTML=`<span>⚠</span><span>${esc(t)}</span>`;body.appendChild(d);scrollTop();},
     info(emoji,t){const d=document.createElement('div');d.className='ln';d.innerHTML=`<span>${emoji}</span><span>${esc(t)}</span>`;body.appendChild(d);scrollTop();},
-    done(){this.finishLine();box.classList.add('done');title.textContent='执行过程';stopTimer();},
+    done(){this.stepDone();box.classList.remove('collapsed');title.textContent='执行过程';stopTimer();},
     html(){return body.style.display==='none'?'':`<div class="exec done"><div class="exec-h"><span class="dot"></span>执行过程</div><div class="exec-b">${body.innerHTML}</div></div>`;},
   };
 }
 
-/* ── 发送（NDJSON 流式 + 实时动作 + 断线恢复）── */
+/* ── 发送（NDJSON 流式 + 实时动作 + 断线恢复 + 可停止）── */
+let activeAC=null; // 当前任务的 AbortController（停止时掐断 fetch 流）
+let activeTaskId=null; // 当前活动 taskId（停止时通知后端协作式中断）
+let userStopped=false; // 用户主动停止（区别于网络断流：停止后不再轮询恢复）
+function setSendingUI(on){
+  const b=$('sendBtn');
+  b.disabled=false; // 发送中保持可点：点击即停止
+  b.textContent=on?'■':'↑';
+  b.title=on?'停止':'发送';
+  b.classList.toggle('stop',on);
+}
+function stopActive(){
+  if(!state.sending)return;
+  userStopped=true;
+  activeAC?.abort();
+  if(activeTaskId)fetch('/api/task/'+activeTaskId+'/abort',{method:'POST'}).catch(()=>{});
+}
 async function doSend(){
+  if(state.sending){stopActive();return;} // 发送中点击 = 停止
   const content=$('ta').value.trim();
-  if(!content||state.sending)return;
-  state.sending=true;$('sendBtn').disabled=true;$('ta').value='';$('ta').style.height='auto';
+  if(!content)return;
+  state.sending=true;$('ta').value='';$('ta').style.height='auto';
+  setSendingUI(true);
+  userStopped=false;activeTaskId=null;activeAC=new AbortController();
   renderMsg({role:'user',content});
   $('welcome')?.remove();
   const d=document.createElement('div');d.className='msg ai';
@@ -338,9 +481,36 @@ async function doSend(){
   d.innerHTML=`<div class="ai-av">♻</div><div class="body"></div>`;
   const body=d.querySelector('.body');
   const view=makeExecView(body);
-  let meta={},taskId=null;
+  let meta={},taskId=null,handled=0; // handled：已渲染的进度事件数（轮询补渲染时跳过）
+  const renderStage=(evt)=>{
+    if(evt.stage==='start'){view.set('正在接收任务…');if(evt.taskId){taskId=evt.taskId;activeTaskId=evt.taskId;}}
+    else if(evt.stage==='pre_search'){view.set('预检索真实信息（规划前）…');view.cur('预检索：'+(String(evt.query||'').slice(0,48)+'…'));}
+    else if(evt.stage==='plan'){view.set('规划中…');view.plan(evt.steps);}
+    else if(evt.stage==='replan'){view.warn(`重新规划（第 ${evt.attempt} 次）：${evt.reason||''}`);}
+    else if(evt.stage==='step'){view.set('执行中…');view.step(evt);}
+    else if(evt.stage==='retry'){view.warn(`参数修正重试：${evt.error||''}`);}
+    else if(evt.stage==='degrade'){view.warn(`「${evt.goal||''}」降级为自身推理（${evt.reason||''}）`);}
+    else if(evt.stage==='step_done'){view.stepDone({goal:evt.goal||'',output:evt.output||evt.preview});}
+    else if(evt.stage==='answer'){view.set('综合回答中…');view.cur(evt.label||'综合回答');}
+    else if(evt.stage==='llm_wait'){
+      // 限流等待透明化：任务没死，是在排队等配额（免费版 ~20 次/分钟）
+      const sec=evt.waitSec??'?';
+      const pos=evt.position??'?';
+      view.set(evt.kind==='rate_limit'
+        ?`服务限流，${sec}s 后自动重试（耐心 ${evt.nth}/${evt.max} 轮）`
+        :`排队等待模型配额（前方 ${pos} 个请求，已等 ${sec}s）…`);
+    }
+  };
+  const renderDone=(q)=>{
+    view.done();meta=q.meta||{};meta.thinkingHtml=view.html();
+    // 流式 done 事件载荷是 message.content；轮询恢复载荷是 result.answer——两者都兼容
+    const answer=q.answer??q.content;
+    body.innerHTML=aiHtml(view.html(),answer||('（任务失败：'+(q.error||'未知')+'）'),{...meta,outcome:q.outcome,basis:q.basis,durationMs:q.durationMs});
+    $('messages').scrollTop=$('messages').scrollHeight;
+    refreshEvoPill();
+  };
   try{
-    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content,quick:$('quickMode').checked})});
+    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content}),signal:activeAC?.signal});
     const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
     while(true){
       const{done,value}=await reader.read();if(done)break;
@@ -348,57 +518,63 @@ async function doSend(){
       while((i=buf.indexOf('\n'))>=0){
         const line=buf.slice(0,i).trim();buf=buf.slice(i+1);if(!line)continue;
         const evt=JSON.parse(line);
-        if(evt.type==='conversation'){
+        if(evt.type==='ping'){/* 心跳保活，忽略 */}
+        else if(evt.type==='conversation'){
           if(!state.convId){state.convId=evt.conversation.id;$('convTitle').textContent=evt.conversation.title;}
         }else if(evt.type==='stage'){
-          if(evt.stage==='start'){view.set('正在接收任务…');if(evt.taskId)taskId=evt.taskId;}
-          else if(evt.stage==='plan'){view.set('已规划 '+evt.steps.length+' 个步骤');view.plan(evt.steps);}
-          else if(evt.stage==='replan'){view.warn(`重新规划（第 ${evt.attempt} 次）：${evt.reason||''}`);}
-          else if(evt.stage==='step'){view.cur(`步骤 ${evt.idx}/${evt.total}：${evt.goal}`);}
-          else if(evt.stage==='retry'){view.warn(`参数修正重试：${evt.error||''}`);}
-          else if(evt.stage==='degrade'){view.warn(`「${evt.goal||''}」降级为自身推理（${evt.reason||''}）`);}
-          else if(evt.stage==='step_done'){view.finishLine(evt.preview);}
-          else if(evt.stage==='answer'){view.set('生成最终回答…');view.cur(evt.label||'综合回答');}
+          try{renderStage(evt);handled++;}catch(re){view.warn('渲染异常：'+(re.message||re));handled++;}
         }else if(evt.type==='done'){
-          view.done();
-          meta=evt.message.meta||{};meta.thinkingHtml=view.html();
-          body.innerHTML=aiHtml(view.html(),evt.message.content,meta);
-          $('messages').scrollTop=$('messages').scrollHeight;
-          refreshEvoPill();
+          renderDone(evt.message);
         }else if(evt.type==='error'){
           view.done();body.innerHTML=`<span class="err">⚠ ${esc(evt.error)}</span>`;
         }
       }
     }
   }catch(e){
-    if(taskId){
-      view.warn('网络中断，等待服务端完成后自动恢复…');
+    if(userStopped||e?.name==='AbortError'){
+      // 用户主动停止：不轮询恢复，立即解锁输入
+      view.done();
+      body.innerHTML+='<div class="note" style="color:#8b8b8b;font-size:12px;padding:4px 0">已停止</div>';
+    }else if(taskId){
+      // 断流无感恢复：切轮询继续拿实时进度（服务端任务不受影响），补渲染漏掉的步骤。
+      // 单次轮询失败只提示不退出（网络抖动不能放弃整个任务），直到拿到 done 或超时。
+      view.set('同步执行进度…');
       const deadline=Date.now()+8*60*1000;
-      try{
-        while(Date.now()<deadline){
-          await new Promise(r=>setTimeout(r,3000));
+      let done=false;
+      while(Date.now()<deadline&&!userStopped){
+        await new Promise(r=>setTimeout(r,2500));
+        try{
           const q=await (await fetch('/api/task/'+taskId)).json();
-          if(q.status==='done'){
-            view.done();meta=q.meta||{};meta.thinkingHtml=view.html();
-            body.innerHTML=aiHtml(view.html(),q.answer||('（任务失败：'+(q.error||'未知')+'）'),{...meta,outcome:q.outcome,basis:q.basis,durationMs:q.durationMs});
-            break;
+          if(Array.isArray(q.events)){
+            for(const evt of q.events.slice(handled)){
+              try{renderStage(evt);handled++;}catch(re){view.warn('渲染异常：'+(re.message||re));handled++;} // 单事件渲染失败不阻塞补渲染
+            }
           }
-        }
-      }catch(_){/* 保留提示 */}
+          if(q.status==='done'){renderDone(q);done=true;break;}
+          view.set('同步执行进度…');
+        }catch(_){view.warn('恢复连接中…（'+(e.message||'连接中断')+'）');}
+      }
+      if(!done&&!userStopped){view.done();body.innerHTML='<span class="err">⚠ 同步超时：任务仍在后台执行，可稍后在对话列表中查看结果</span>';}
     }else{
       view.done();body.innerHTML=`<span class="err">网络错误：${esc(e.message)}</span>`;
     }
+  }finally{
+    // 无论正常完成、异常、还是用户停止：输入永远解锁，绝不锁死
+    state.sending=false;setSendingUI(false);activeAC=null;activeTaskId=null;
+    $('ta').focus();
+    refreshConvs();
+    if(state.evoOpen)refreshEvo();
   }
-  state.sending=false;$('sendBtn').disabled=false;$('ta').focus();
-  refreshConvs();
-  if(state.evoOpen)refreshEvo();
 }
 
 /* ── 配置 ── */
+let _toolbox = { runtime: true, network: true, fileio: true };
 async function openCfg(){
   const c=await (await fetch('/api/config')).json();
   $('cfgBase').value=c.baseUrl||'';$('cfgModel').value=c.model||'';
   $('cfgKey').value='';$('cfgKeyMask').textContent=c.apiKeyMasked?`（当前 ${c.apiKeyMasked}）`:'';
+  _toolbox = c.toolbox || _toolbox;
+  syncToolboxUI();
   $('cfgTestRes').textContent='';$('cfgModal').classList.add('open');
 }
 async function testCfg(){
@@ -408,12 +584,18 @@ async function testCfg(){
   else{$('cfgTestRes').className='bad';$('cfgTestRes').textContent='✗ '+r.error;}
 }
 async function saveCfg(){
-  const b={baseUrl:$('cfgBase').value.trim(),model:$('cfgModel').value.trim()};
+  const b={baseUrl:$('cfgBase').value.trim(),model:$('cfgModel').value.trim(),toolbox:{..._toolbox}};
   const k=$('cfgKey').value.trim();if(k)b.apiKey=k;
   const r=await (await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();
   if(r.error){$('cfgTestRes').className='bad';$('cfgTestRes').textContent='✗ '+r.error;return;}
-  closeModal('cfgModal');refreshLlmPill();
+  _toolbox = r.toolbox || _toolbox;
+  closeModal('cfgModal');refreshLlmPill();syncToolboxUI();
 }
+function syncToolboxUI(){
+  const r=$('tbRuntime'),n=$('tbNetwork'),f=$('tbFileio');
+  if(r){r.checked=!!_toolbox.runtime;n.checked=!!_toolbox.network;f.checked=!!_toolbox.fileio;}
+}
+function toolTip(el){el.title=_toolbox.runtime?'运行时/计算工具（calc、run_js）已启用，关闭则任务只能做搜索+推理，不能算/写码':''+(_toolbox.network?'网络工具（http_get）已启用，关闭则任务不能联网搜索':'')+(_toolbox.fileio?'文件读写已启用，关闭则任务不能读写沙箱文件':'')}
 
 /* ── 能力分享（社会化进化）── */
 async function exportShare(){
@@ -480,7 +662,71 @@ function toggleSidebar(){
   $('sidebar').classList.toggle('collapsed');
   localStorage.setItem('spa_sidebar_open',document.querySelector('aside.side').classList.contains('collapsed')?'0':'1');
 }
+
+// Context menu state
+let ctxMenu = null;
+let ctxConvId = null;
+
+function showContextMenu(id, rect) {
+  closeContextMenu();
+  ctxConvId = id;
+  const m = document.createElement('div');
+  m.className = 'ctx-menu';
+  m.innerHTML = `
+    <button data-action="rename">✏ 重命名</button>
+    <div class="ctx-sep"></div>
+    <button data-action="delete" class="danger">🗑 删除对话</button>
+  `;
+  const x = rect ? rect.x : window.innerWidth / 2;
+  const y = rect ? rect.y : window.innerHeight / 2;
+  m.style.left = Math.min(x, window.innerWidth - 180) + 'px';
+  m.style.top = Math.min(y, window.innerHeight - 100) + 'px';
+  document.body.appendChild(m);
+  ctxMenu = m;
+  m.querySelectorAll('button').forEach(btn => {
+    btn.onclick = () => { handleCtxAction(btn.dataset.action); closeContextMenu(); };
+  });
+}
+
+function closeContextMenu() {
+  if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; ctxConvId = null; }
+}
+
+async function handleCtxAction(action) {
+  if (!ctxConvId) return;
+  if (action === 'rename') {
+    const title = prompt('重命名对话：', '');
+    if (title) {
+      await fetch(`/api/conversations/${ctxConvId}/rename`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});
+      refreshConvs();
+      if (state.convId === ctxConvId) loadConv(ctxConvId);
+    }
+  } else if (action === 'delete') {
+    if (confirm('确定删除该对话？')) {
+      await delConv(ctxConvId);
+    }
+  }
+}
+
+// Close on outside click
+document.addEventListener('click', e => {
+  if (ctxMenu && !ctxMenu.contains(e.target)) closeContextMenu();
+});
+
+// Add contextmenu listener to conv list
+function initContextMenu() {
+  document.getElementById('convs')?.addEventListener('contextmenu', e => {
+    const el = e.target.closest('.conv');
+    if (!el) return;
+    e.preventDefault();
+    const id = el.dataset.convId;
+    showContextMenu(id, el.getBoundingClientRect());
+  });
+}
+
 (function(){
   if(localStorage.getItem('spa_sidebar_open')==='0'){$('sidebar').classList.add('collapsed');}
 })();
+
+initContextMenu();
 </script></body></html>

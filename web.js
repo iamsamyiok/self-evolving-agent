@@ -17,6 +17,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 function maskKey(k) { return k ? `${k.slice(0, 5)}***${k.slice(-4)}` : ''; }
 
 export class WebServer {
+  /** 活动任务注册表：taskId → { events, done, result, at }。断流后轮询取实时进度 */
+  static liveTasks = new Map();
+
   constructor({ store, executor, loop, control, configPath = join(ROOT, 'config', 'local.json') }) {
     this.store = store;
     this.executor = executor;
@@ -32,6 +35,21 @@ export class WebServer {
     const now = Date.now();
     this.store.db.prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)').run(id, title.slice(0, 60), now, now);
     return { id, title, created_at: now, updated_at: now };
+  }
+
+  async renameConversation(id, title) {
+    if (!title || !title.trim()) throw new Error('标题不能为空');
+    const t = String(title).slice(0, 60);
+    this.store.db.prepare('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?').run(t, Date.now(), id);
+    return { ok: true };
+  }
+
+  async deleteConversations(ids) {
+    if (!ids?.length) return { deleted: 0 };
+    const placeholders = ids.map(() => '?').join(',');
+    this.store.db.prepare(`DELETE FROM messages WHERE conversation_id IN (${placeholders})`).run(...ids);
+    this.store.db.prepare(`DELETE FROM conversations WHERE id IN (${placeholders})`).run(...ids);
+    return { deleted: ids.length };
   }
 
   conversations() {
@@ -100,7 +118,10 @@ export class WebServer {
   // ───────── 配置读写（热生效）─────────
   getConfig() {
     const eff = effectiveLLM();
-    return { baseUrl: eff.baseUrl, model: eff.model, apiKeyMasked: maskKey(eff.apiKey), configured: Boolean(eff.apiKey) || CONFIG.MOCK, mock: CONFIG.MOCK };
+    return { baseUrl: eff.baseUrl, model: eff.model, apiKeyMasked: maskKey(eff.apiKey), configured: Boolean(eff.apiKey) || CONFIG.MOCK, mock: CONFIG.MOCK, toolbox: this.getUserToolbox() };
+  }
+  getUserToolbox() {
+    return this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
   }
 
   saveConfig({ baseUrl, apiKey, model }) {
@@ -130,15 +151,19 @@ export class WebServer {
 
     try {
       if (req.method === 'GET' && path === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); // 前端迭代频繁，禁缓存防止浏览器跑旧 JS
         res.end(readFileSync(join(ROOT, 'web', 'chat.html'), 'utf8'));
         return;
       }
       if (req.method === 'GET' && path === '/api/config') return send(200, this.getConfig());
       if (req.method === 'POST' && path === '/api/config') {
         const b = await body();
-        if (!b.baseUrl && !b.model && !b.apiKey) return send(400, { error: '无有效字段' });
-        return send(200, this.saveConfig(b));
+        if (!b.baseUrl && !b.model && !b.apiKey && b.toolbox == null) return send(400, { error: '无有效字段' });
+        const saved = this.saveConfig(b);
+        if (b.toolbox != null) {
+          try { this.store.setState('user_toolbox', JSON.parse(JSON.stringify(b.toolbox))); } catch {}
+        }
+        return send(200, { ...saved, toolbox: this.getUserToolbox() });
       }
       if (req.method === 'POST' && path === '/api/config/test') {
         const b = await body();
@@ -150,6 +175,21 @@ export class WebServer {
       if (req.method === 'POST' && path === '/api/conversations') {
         const b = await body();
         return send(200, this.newConversation(b.title));
+      }
+      if (req.method === 'PATCH' && path.match(/^\/api\/conversations\/[\w-]+\/rename$/)) {
+        const id = path.match(/^\/api\/conversations\/([\w-]+)\/rename$/)[1];
+        const b = await body();
+        try {
+          const r = await this.renameConversation(id, b.title);
+          return send(200, r);
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+      if (req.method === 'DELETE' && path === '/api/conversations') {
+        const b = await body();
+        try {
+          const r = await this.deleteConversations(b.ids);
+          return send(200, r);
+        } catch (e) { return send(400, { error: e.message }); }
       }
       const convMatch = path.match(/^\/api\/conversations\/([\w-]+)(\/messages)?$/);
       if (convMatch) {
@@ -193,6 +233,10 @@ export class WebServer {
       // 任务结果查询（断线重连恢复：任务结束落库后可凭 taskId 取回，未结束返回 pending）
       const taskMatch = path.match(/^\/api\/task\/([\w-]+)$/);
       if (taskMatch && req.method === 'GET') {
+        // 活动任务：流已断但任务仍在执行 → 返回实时进度事件，前端补渲染漏掉的步骤
+        const live = WebServer.liveTasks.get(taskMatch[1]);
+        if (live && !live.done) return send(200, { status: 'running', events: live.events });
+        if (live?.done) return send(200, { status: 'done', events: live.events, ...live.result });
         const row = this.store.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskMatch[1]);
         if (!row) return send(200, { status: 'pending' }); // 还在执行（结束才落库）
         const msg = this.store.db.prepare('SELECT meta FROM messages WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(row.id);
@@ -201,6 +245,16 @@ export class WebServer {
           outcome: row.outcome, basis: row.outcome_basis, answer: row.answer, error: row.error,
           durationMs: row.duration_ms, meta: msg?.meta ? JSON.parse(msg.meta) : null,
         });
+      }
+      // 停止任务（用户主动取消：LLM 等待/排队/步骤边界协作式中断，几秒内生效）
+      const abortMatch = path.match(/^\/api\/task\/([\w-]+)\/abort$/);
+      if (abortMatch && req.method === 'POST') {
+        const live = WebServer.liveTasks.get(abortMatch[1]);
+        if (live && !live.done) {
+          live.abort = true; // isAborted() 轮询此标志：429 退避/令牌排队/步骤边界立即中断
+          return send(200, { status: 'aborting' });
+        }
+        return send(200, { status: 'noop' });
       }
       res.writeHead(404); res.end('not found');
     } catch (e) {
@@ -216,14 +270,29 @@ export class WebServer {
       return res.end(JSON.stringify({ type: 'error', error: '消息为空' }) + '\n');
     }
     content = String(content).slice(0, 8000);
+    const ub = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
+    if (!CONFIG.TOOLS_ENABLED) {
+      res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
+      return res.end(JSON.stringify({ type: 'error', error: '全局工具已禁用（TOOL_ENABLED=0），仅允许 reason/answer 步骤' }) + '\n');
+    }
+    if (!ub.runtime && !ub.network && !ub.fileio) {
+      res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
+      return res.end(JSON.stringify({ type: 'error', error: '工具箱所有子功能均被禁用，请至少在配置中开启一项' }) + '\n');
+    }
     const eff = effectiveLLM();
     if (!CONFIG.MOCK && !eff.apiKey) {
       res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
       return res.end(JSON.stringify({ type: 'error', error: '请先配置 LLM（右上角 ⚙️）' }) + '\n');
     }
     // 先落 header，再用 send 写事件，避免 writeHead 第二次调用报错
-    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const send = (obj) => res.write(JSON.stringify(obj) + '\n');
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
+    const send = (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch { /* 客户端已断开/已停止 */ } };
+    // 心跳保活：事件之间的 LLM 调用/限流等待可达 60s+，中间代理会因流空闲掐断连接。
+    // 每 15s 发一行 ping 保持字节流动（前端忽略），任务结束即停。
+    const heartbeat = setInterval(() => {
+      try { if (!res.writableEnded) res.write('{"type":"ping"}\n'); } catch { /* 已断开 */ }
+    }, 15_000);
+    const finish = () => { clearInterval(heartbeat); try { res.end(); } catch { /* 已断开 */ } };
 
     // 会话：新建则以首句为题
     let conv = conversationId ? this.store.db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversationId) : null;
@@ -242,14 +311,25 @@ export class WebServer {
       ? `【多轮对话，结合上下文回答当前问题】\n${recent.map((m) => `${m.role === 'user' ? '用户' : '助手'}: ${m.content.slice(0, 300)}`).join('\n')}\n\n【当前问题】${content}`
       : content;
 
+    // 活动任务注册：流断开后前端轮询 /api/task/:id 也能拿到实时进度事件（断流不丢展示）
+    const taskId = uuid7();
+    const live = { events: [], done: false, result: null, at: Date.now(), abort: false };
+    WebServer.liveTasks.set(taskId, live);
+    if (WebServer.liveTasks.size > 50) {
+      const now = Date.now();
+      for (const [k, v] of WebServer.liveTasks) {
+        if (v.done && now - v.at > 10 * 60_000) WebServer.liveTasks.delete(k);
+      }
+    }
     try {
-      const taskId = uuid7();
       send({ type: 'stage', stage: 'start', quick, taskId });
+      live.events.push({ stage: 'start', quick, taskId }); // 与流事件序列完全对齐（轮询补渲染下标一致）
       const trace = await this.loop.submitTask(input, {
         quick,
         silent: true,
         taskId,
-        onProgress: (e) => send({ type: 'stage', ...e }),
+        isAborted: () => live.abort === true, // 停止端点置位 → LLM 等待/排队/步骤边界协作式中断
+        onProgress: (e) => { live.events.push(e); send({ type: 'stage', ...e }); },
       });
       const meta = {
         outcome: trace.outcome,
@@ -261,15 +341,24 @@ export class WebServer {
         error: trace.error,
       };
       const msgId = this.addMessage(conv.id, 'assistant', trace.answer ?? `（任务失败：${trace.error ?? '未知错误'}）`, { taskId: trace.id, meta });
+      live.result = { outcome: trace.outcome, basis: trace.basis, answer: trace.answer, error: trace.error, durationMs: trace.duration_ms, meta };
+      live.done = true;
       send({ type: 'done', message: { id: msgId, role: 'assistant', content: trace.answer ?? '', meta, createdAt: Date.now() } });
     } catch (e) {
+      // 失败也必须标记 live 完成：否则断流后前端轮询永远拿到 running，界面卡死在"恢复连接中"
+      live.result = { outcome: 'FAIL', basis: 'error', answer: null, error: String(e?.message ?? e), durationMs: Date.now() - live.at, meta: null };
+      live.done = true;
       send({ type: 'error', error: String(e?.message ?? e) });
     }
-    res.end();
+    finish(); // 停心跳并结束响应
   }
 
   listen(port) {
     this.server = createServer((req, res) => this.handle(req, res));
+    // NDJSON 长流：多步任务 + LLM 限流等待可远超默认 300s，禁用请求级超时（心跳维持连接活性）
+    this.server.requestTimeout = 0;
+    this.server.headersTimeout = 0;
+    this.server.keepAliveTimeout = 72_000;
     return new Promise((resolve) => this.server.listen(port, () => resolve(this.server)));
   }
   close() { this.server?.close(); }

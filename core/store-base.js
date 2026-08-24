@@ -171,6 +171,28 @@ export class Store {
     return this.db.prepare(`SELECT * FROM ${table} ${where}`).all(...params);
   }
 
+  /** 检索记账直写：只动访问计数/最近使用时间，不递增 version/updated_at（避免检索索引缓存每次任务后失效） */
+  touch(entityType, ids, { access = false, lastUsed = true } = {}) {
+    if (!ids?.length) return;
+    const table = TABLES[entityType];
+    const cols = [];
+    const vals = [];
+    if (access) cols.push('access_count = access_count + 1');
+    if (lastUsed) { cols.push('last_used_at = ?'); vals.push(Date.now()); }
+    if (!cols.length) return;
+    this.db.prepare(`UPDATE ${table} SET ${cols.join(', ')} WHERE id IN (${ids.map(() => '?').join(', ')})`)
+      .run(...vals, ...ids);
+  }
+
+  /** 统计记账直写（成功/失败/执行计数/质量分等）：不走乐观锁版本递增，供高频路径（recordExecution/recordOutcome）使用 */
+  bumpStats(entityType, id, fields) {
+    const table = TABLES[entityType];
+    const keys = Object.keys(fields);
+    if (!keys.length) return;
+    this.db.prepare(`UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
+      .run(...keys.map((k) => fields[k]), id);
+  }
+
   /** 状态迁移唯一入口（§3.3）：非法迁移直接抛错 */
   transition(entityType, id, toState, extraFields = {}) {
     const table = TABLES[entityType];

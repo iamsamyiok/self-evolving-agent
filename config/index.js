@@ -33,6 +33,7 @@ export const CONFIG = {
   LLM_MODEL: env.SPA_MODEL ?? local.LLM_MODEL ?? 'deepseek-chat',
   LLM_TIMEOUT_MS: 60_000,
   LLM_MAX_RETRIES: 4,
+  LLM_429_MAX_WAITS: Number(env.SPA_LLM_429_WAITS ?? local.LLM_429_MAX_WAITS ?? 5), // 429 专属耐心轮数：每轮重新排队令牌再试
   LLM_CONCURRENCY: 2,  // 降低并发，避免触发限流
   LLM_RATE_LIMIT_PER_MIN: 20,  // 每分钟最大请求数（免费版限制）
 
@@ -50,6 +51,8 @@ export const CONFIG = {
   // ── 上下文与检索 ──
   MAX_CONTEXT_TOKEN: BOUNDS.MAX_CONTEXT_TOKEN[1],
   RETRIEVAL_TOP_K: BOUNDS.RETRIEVAL_TOP_K[1],
+  // 检索索引缓存上界：ACTIVE 记忆超出后按温度（质量+重要性+时近性）保留最热子集（渐进式加载）
+  MEMORY_INDEX_MAX_ROWS: Number(env.SPA_MEMORY_INDEX_MAX_ROWS ?? local.MEMORY_INDEX_MAX_ROWS ?? 20000),
 
   // ── 评分与状态机阈值（Wilson 下界域，迟滞带：晋升>降级>淘汰，间隔≥0.15）──
   SKILL_PROMOTE_W: BOUNDS.SKILL_PROMOTE_W[1],
@@ -97,6 +100,10 @@ export const CONFIG = {
   TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn', 'api.anysearch.com', 'news.google.com']),
   // 开放网络模式（默认开）：http_get 不再受白名单限制，可访问任意公网站点（仍拦私网 SSRF 与凭据外传）
   TOOL_NET_OPEN: (env.SPA_TOOL_NET_OPEN ?? local.TOOL_NET_OPEN ?? '1') === '1',
+  // 用户级设置：由 LLM 配置模态框保存（热生效），不写本地.json
+  USER_TOOLBOX_RUNTIME: true,  // 代码/计算工具（calc、run_js 等）
+  USER_TOOLBOX_NETWORK: true,  // 网络工具（http_get）
+  USER_TOOLBOX_FILEIO: true,   // 文件系统工具（fs_read/write/list）
   NEWS_API_KEY: env.NEWS_API_KEY ?? '',  // 可选：NewsAPI 密钥（免费层 100 次/天）
   ANYSEARCH_API_KEY: env.ANYSEARCH_API_KEY ?? '',  // 可选：AnySearch API Key（推荐注册获取更高配额）
 

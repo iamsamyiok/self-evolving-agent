@@ -8,12 +8,12 @@ import { ExperienceEngine, traceHash } from './experience-engine.js';
 import { SkillSystem } from './skill-system.js';
 import { ToolRuntime } from './tool-runtime.js';
 import { loadDynamicTools } from './dynamic-tool-loader.js';
-import { chat, chatJson, judge, budgetExhausted, labelBudgetLeft, getUsage } from './llm-adapter.js';
+import { chat, chatJson, judge, budgetExhausted, labelBudgetLeft, getUsage, taskScope, isAborted, ABORT_ERR } from './llm-adapter.js';
 import { assembleWithinBudget } from '../utils/token-utils.js';
 import { checkStep } from './safety-constitution.js';
 
 export const DEFAULT_PROMPTS = {
-  planner: '你是任务规划器。把任务拆成可执行步骤：简单问题 2-3 步，复杂问题（多源查询/写码/多步计算/调研综合）可拆 5-8 步。输出 JSON：{"steps":[{"goal":"...","action":"reason|answer|tool:<名>","params":{}}]}。\n\n{{TOOL_SECTION}}\n\n重要说明：\n1. 只能使用上述列出的工具名，禁止编造工具名；参数名也必须与清单一致\n2. 数值计算必须用 tool:calc（精确计算），禁止心算\n3. 若任务涉及外部 API 查询（天气、搜索等），且存在对应技能，使用 tool:skill:<技能名>\n4. 写代码/数据处理/逻辑验证类任务：先写代码，再用 tool:run_js 运行验证结果正确性\n5. 能力拓展原则——缺专用工具时绝不能放弃，按序尝试：a) http_get 调公开免Key服务（天气 https://api.open-meteo.com/v1/forecast?latitude=xx&longitude=xx&current_weather=true；汇率 https://open.er-api.com/v6/latest/USD；随机数据/占位 https://api.github.com 等，坐标等前置知识用 reason 步骤推出）b) run_js 写代码自行实现（解析/转换/生成类任务）c) reason 步骤用自身知识直接完成。三种途径穷尽后才允许说明局限并给出所知最佳答案\n6. 简单问题直接用 reason/answer 步骤，无需工具',
+  planner: '你是任务规划器。把任务拆成可执行步骤：简单问题 2-3 步，复杂问题（多源查询/写码/多步计算/调研综合）可拆 5-8 步。输出 JSON：{"steps":[{"goal":"...","action":"reason|answer|tool:<名>","params":{}}]}。\n\n{{TOOL_SECTION}}\n\n重要说明：\n1. 只能使用上述列出的工具名，禁止编造工具名；参数名也必须与清单一致\n2. 数值计算必须用 tool:calc（精确计算），禁止心算\n3. 若任务涉及外部 API 查询（天气、搜索等），且存在对应技能，使用 tool:skill:<技能名>\n4. 写代码/数据处理/逻辑验证类任务：先写代码，再用 tool:run_js 运行验证结果正确性\n5. 能力拓展原则——缺专用工具时绝不能放弃，按序尝试：a) news_search 搜索获取实时信息（新闻/时事/热点等一切"模型训练数据之外"的信息）b) http_get 调已知公开免Key API（天气 https://api.open-meteo.com/v1/forecast?latitude=xx&longitude=xx&current_weather=true；汇率 https://open.er-api.com/v6/latest/USD 等，坐标等前置知识用 reason 步骤推出——http_get 只用于你确切知道完整 URL 的 API，禁止用它拼搜索引擎页面 URL，搜索一律用 news_search）c) run_js 写代码自行实现（解析/转换/生成类任务）d) reason 步骤用自身知识直接完成。穷尽后才允许说明局限并给出所知最佳答案\n6. 遇到不会或不确定的问题时，优先用 news_search 搜索网络获取信息后再解决，而不是直接给出可能过时或编造的答案；信息类任务（新闻/数据/行情）的结论必须基于 news_search 返回的真实内容，禁止凭空编造新闻、数据或来源\n7. 简单问题直接用 reason/answer 步骤，无需工具',
   step: '你是任务执行者，按步骤推进。',
   final: '你是任务执行者。基于全部步骤输出最终回答（简洁、直接给结果）。',
 };
@@ -24,7 +24,7 @@ export class AgentExecutor {
     this.memory = new MemorySystem(store);
     this.experience = new ExperienceEngine(store);
     this.skills = new SkillSystem(store, this);
-    this.tools = new ToolRuntime();
+    this.tools = new ToolRuntime(this.store);
     // 注入 skillSystem 引用，供 safety-constitution 校验 skill 工具
     this.tools.skillSystem = this.skills;
     // 热插拔工具：tools/ 目录下的自定义工具自动注册（失败单个跳过）
@@ -52,13 +52,30 @@ export class AgentExecutor {
 
   prompt(role) {
     let base = this.store.activePrompt(role)?.content ?? DEFAULT_PROMPTS[role];
+    // 时间感知（planner/step/final）：模型训练数据停在过去，不知道"今天"——
+    // 不注入当前时间，"最近一周"会被换算成训练数据里的日期，产出过时/编造内容
+    if (['planner', 'step', 'final'].includes(role)) {
+      const n = new Date();
+      const wk = '日一二三四五六'[n.getDay()];
+      const pad = (x) => String(x).padStart(2, '0');
+      const now = `${n.getFullYear()}年${n.getMonth() + 1}月${n.getDate()}日（周${wk}）${pad(n.getHours())}:${pad(n.getMinutes())}`;
+      base += `\n\n当前时间：${now}。所有"最近/最新/今天/本周/此时"等相对时间一律以当前时间为准换算；你的训练数据早于当前时间，训练知识中的"近期/最新"内容大概率已过时。`;
+    }
     if (role !== 'planner') return base;
     // 兼容升级：DB 中旧版 planner（硬编码工具清单）不含占位符时，回退到新默认模板
     if (!base.includes('{{TOOL_SECTION}}')) base = DEFAULT_PROMPTS.planner;
     // planner 动态注入真实工具 + 激活技能清单（与运行时注册表同源，杜绝幻影工具）
     const tools = this.tools.list()
       .filter((t) => !(t.name === 'shell') || CONFIG.TOOL_SHELL_ENABLED)
-      .map((t) => `- ${t.name}：${t.desc}`)
+      .map((t) => {
+        const ub = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
+        if (['calc','run_js'].includes(t.name) && !ub.runtime) return null;
+        if (t.name === 'http_get' && !ub.network) return null;
+        if (t.name === 'news_search' && !ub.network) return null;
+        if (/^fs_/.test(t.name) && !ub.fileio) return null;
+        return `- ${t.name}：${t.desc}`;
+      })
+      .filter(Boolean)
       .join('\n');
     const skills = (this.skills?.active() ?? [])
       .map((s) => `- skill:${s.name}：${String(s.description).slice(0, 80)}`)
@@ -115,18 +132,59 @@ export class AgentExecutor {
     return { text, used };
   }
 
-  /** 执行单个任务。opts: { assertion, skillOverride, silent, goldenCheck, label, quick, onProgress } */
+  /** 执行单个任务。opts: { assertion, skillOverride, silent, goldenCheck, label, quick, onProgress, isAborted } */
   async runTask(input, opts = {}) {
+    // taskScope：把 progress 闭包与停止标志注入 LLM 适配层
+    // （429 等待/令牌排队时上报状态；用户停止时长等待立即中断）
+    return taskScope.run(
+      {
+        progress: (evt) => { try { opts.onProgress?.(evt); } catch { /* 进度回调失败不影响任务 */ } },
+        aborted: typeof opts.isAborted === 'function' ? opts.isAborted : undefined,
+      },
+      () => this._runTask(input, opts),
+    );
+  }
+
+  async _runTask(input, opts = {}) {
     const start = Date.now();
     const id = opts.taskId ?? uuid7(); // 外部预分配 ID：断线重连时前端可凭此查询结果
     const label = opts.label ?? `task:${id}`;
     const budgetWarn = budgetExhausted();
-    const { text: context, used } = this.assembleContext(input, opts.skillOverride ?? null);
+    let { text: context, used } = this.assembleContext(input, opts.skillOverride ?? null);
     const progress = (evt) => { try { opts.onProgress?.(evt); } catch { /* 进度回调失败不影响任务 */ } };
     let plan = null, steps = [], answer = null, error = null;
     const degradeNotes = []; // 韧性降级记录（final 综合时如实告知用户）
     let replanned = 0; // 反射重规划次数
     try {
+      // 快速模式实时性守卫：quick 是单次直答（无搜索），实时类问题直答必幻觉——自动升级完整模式
+      const realtime = /最近|最新|今天|本周|近日|新闻|行情|现价|此刻|now|current|latest|today/i.test(input);
+      if (opts.quick && realtime) {
+        progress({ stage: 'replan', attempt: 0, reason: '问题涉及实时信息，快速模式自动转为搜索模式' });
+        opts = { ...opts, quick: false };
+      }
+      // 预检索（规划信息地基）：实时/外部信息类任务先搜索真实数据再规划——
+      // 规划器对外部现状纯靠猜，拆出的步骤常建立在过时假设上；预检索让步骤基于真实信息（成本：1 次免费搜索）
+      if (!opts.quick && realtime && isAborted() === false) {
+        const ub = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
+        if (ub.network && this.tools.get('news_search')) {
+          try {
+            const q = String(input.includes('【当前问题】') ? input.split('【当前问题】').pop() : input).slice(0, 80);
+            // 自动补充分词：时间词/公司名/产品名 → 追加搜索限定，避免返回泛化新闻淹没关键信息
+            const timeWords = '今天|昨天|本周|最近一周|上周|今年以来|今年|此刻|当前|最新|现在';
+            const hasTime = new RegExp(timeWords).test(q);
+            const namedEntity = /(OpenAI|DeepSeek|Claude|Gemini|GPT|大模型|AI\s*模型|模型发布|Sora|ChatGPT|豆包|通义|文心|Kimi|星火)/i.test(q) ? q : null;
+            const refinedQuery = hasTime && namedEntity
+              ? `${namedEntity} 最新模型发布消息 ${hasTime ? q.replace(/最近一周|最新/g, '').trim() : ''}`.replace(/\s{2,}/g, ' ').trim()
+              : q;
+            progress({ stage: 'pre_search', query: refinedQuery });
+            const r = await this.tools.call('news_search', { query: refinedQuery, maxResults: 6 }, { taskId: label });
+            const pre = String(r?.output ?? '').trim().slice(0, 4000);
+            if (pre) {
+              context = `${context}\n\n【预检索结果（真实网络搜索数据，比你的训练数据可靠）】\n${pre}\n（规划参考：若此数据已足够支撑任务，后续步骤直接基于它提炼综合，无需重复搜索；不足则规划进一步搜索步骤）`;
+            }
+          } catch { /* 预检索失败不阻塞：规划照常进行 */ }
+        }
+      }
       if (opts.quick) {
         // 快速模式：单次直接回答（仍走判定+进化钩子，保持自进化信号）
         progress({ stage: 'answer', label: '快速回答' });
@@ -146,6 +204,7 @@ export class AgentExecutor {
         progress({ stage: 'plan', steps: plan.steps.map((s) => s.goal) });
 
         for (const [i, step] of plan.steps.entries()) {
+          if (isAborted()) throw ABORT_ERR; // 用户停止：不再开始下一个步骤
           progress({ stage: 'step', idx: i + 1, total: plan.steps.length, goal: step.goal });
           const stepStart = Date.now();
           if (labelBudgetLeft(label, CONFIG.TASK_TOKEN_BUDGET) <= 0) {
@@ -165,10 +224,11 @@ export class AgentExecutor {
           }
            if (output == null) throw new Error(`步骤「${step.goal}」连续失败`);
            // 完整输出供 final 综合与 judge 使用；full 字段不落库（避免轨迹膨胀）
-           steps.push({ goal: step.goal, action: step.action, output: String(output).slice(0, 500), full: String(output).slice(0, 4000) });
-           progress({ stage: 'step_done', idx: i + 1, total: plan.steps.length, ms: Date.now() - stepStart, preview: String(output).replace(/\s+/g, ' ').slice(0, 80) });
+            steps.push({ goal: step.goal, action: step.action, output: String(output).slice(0, 500), full: String(output).slice(0, 4000) });
+            progress({ stage: 'step_done', idx: i + 1, total: plan.steps.length, ms: Date.now() - stepStart, goal: step.goal, output: String(output).replace(/\s+/g, ' ').slice(0, 2000), preview: String(output).replace(/\s+/g, ' ').slice(0, 80) });
          }
 
+        if (isAborted()) throw ABORT_ERR; // 用户停止：跳过最终综合（省一次 LLM 调用）
         progress({ stage: 'answer', label: '综合回答' });
         const stepsForFinal = steps.map(({ full, ...s }) => ({ ...s, output: full ?? s.output }));
         const fin = await chat({
@@ -200,7 +260,7 @@ export class AgentExecutor {
               if (r.output != null) {
                 if (r.degraded && r.note) degradeNotes.push(r.note);
                 steps.push({ goal: step.goal, action: step.action, output: String(r.output).slice(0, 500), full: String(r.output).slice(0, 4000) });
-                progress({ stage: 'step_done', idx: i + 1, total: plan.steps.length, ms: Date.now() - stepStart, preview: String(r.output).replace(/\s+/g, ' ').slice(0, 80) });
+                progress({ stage: 'step_done', idx: i + 1, total: plan.steps.length, ms: Date.now() - stepStart, goal: step.goal, output: String(r.output).replace(/\s+/g, ' ').slice(0, 2000), preview: String(r.output).replace(/\s+/g, ' ').slice(0, 80) });
               }
             }
             if (steps.length > keepSteps) {
@@ -244,18 +304,23 @@ export class AgentExecutor {
       ).run(id, input, plan ? JSON.stringify(plan) : null, JSON.stringify(stepsForDb), answer, outcome, basis, u.tokensIn, u.tokensOut, error, duration, Date.now());
     });
 
-    // 进化钩子（异步不阻塞；日预算 L3 触顶 → 降级为仅规则性沉淀）
+    // 进化钩子（异步不阻塞；日预算 L3 触顶 → 降级为仅规则性沉淀；令牌余量不足 → 让路给用户主任务）
     if (this.evolveHooks && !opts.goldenCheck) {
-      this._evolveTail = (async () => {
+      this._evolveTail = taskScope.run({}, async () => {
         try {
           const degraded = budgetExhausted();
+          // 免费限流让路：余量 <6 时跳过全部 LLM 类钩子（抽取/复盘/提炼/门禁），只做零成本记账。
+          // 连续提问场景下进化钩子会把 20/min 配额吃光，导致用户下一个任务直接 429。
+          const { tokensAvailable } = await import('./llm-adapter.js');
+          const starved = tokensAvailable() < 6;
+          if (starved) this.store.setState('evolve_skipped_low_tokens', { at: Date.now(), taskId: id });
           await Promise.allSettled([
-            degraded ? null : this.memory.extractFromTrace(trace),
-            this.experience.retrospect(trace),
-            degraded ? null : this.skills.distillFromTrace(trace).then((r) => r?.status === 'draft' && this.skills.verifyDraft(r.id)),
+            degraded || starved ? null : this.memory.extractFromTrace(trace),
+            degraded || starved ? null : this.experience.retrospect(trace),
+            degraded || starved ? null : this.skills.distillFromTrace(trace).then((r) => r?.status === 'draft' && this.skills.verifyDraft(r.id)),
             this.goldenColdStart(trace),
           ]);
-          if (context && outcome) this.chargeSkills(input, outcome === 'SUCCESS');
+          if (context && outcome && error !== '已停止') this.chargeSkills(input, outcome === 'SUCCESS'); // 中止任务不惩罚技能
         } catch (e) {
           // store_closed = 正常停机竞态，静默；其余错误留痕供诊断
           if (String(e?.message) !== 'store_closed') {
@@ -264,7 +329,7 @@ export class AgentExecutor {
         } finally {
           this.onTaskDone?.(trace);
         }
-      })();
+      });
     }
 
     if (!opts.silent) this.printTrace(trace, { budgetWarn });
@@ -287,7 +352,7 @@ export class AgentExecutor {
     const r = await chat({
       messages: [
         { role: 'system', content: `${this.prompt('step')}${context ? '可用背景：\n' + context : ''}` },
-        { role: 'user', content: `${degradeNote ? `【韧性降级】${degradeNote}\n` : ''}任务：${input}\n当前步骤：${step.goal}\n已完成：${JSON.stringify(steps.map((s) => s.goal))}\n请输出本步骤结果（一段文字）。` },
+        { role: 'user', content: `${degradeNote ? `【韧性降级】${degradeNote}\n本步骤工具执行失败，改用自身知识完成——若本步骤涉及实时/外部信息（新闻、数据、行情等），必须在结果开头声明"以下内容未经联网核实，基于模型训练数据，可能过时"，禁止编造具体新闻、数字或来源。\n` : ''}任务：${input}\n当前步骤：${step.goal}\n已完成：${JSON.stringify(steps.map((s) => s.goal))}\n请输出本步骤结果（一段文字）。` },
       ], temperature: 0.3, label,
     });
     return r.text?.trim() || null;
@@ -373,18 +438,28 @@ export class AgentExecutor {
     const results = [];
     for (const subStep of steps) {
       if (subStep.action === 'reason' || subStep.action === 'answer') {
+        // 前序子步骤结果作为输入（链式传递：工具步骤的产出是 reason 步骤的分析对象，缺失即退化成幻觉）
+        const prior = results.map((r) => `【${r.goal}】\n${String(r.output ?? '').slice(0, 2500)}`).join('\n\n');
         const r = await chat({
           messages: [
             { role: 'system', content: this.prompt('step') },
-            { role: 'user', content: `【技能「${skillName}」步骤】${subStep.goal}\n参数：${JSON.stringify(params)}\n请输出本步骤结果。` },
+            { role: 'user', content: `【技能「${skillName}」步骤】${subStep.goal}${subStep.expected ? `\n（预期产出：${subStep.expected}）` : ''}\n参数：${JSON.stringify(params)}\n${prior ? `前序步骤结果（分析必须基于这些真实内容，禁止编造其中不存在的数据）：\n${prior}` : ''}\n请输出本步骤结果（一段文字）。` },
           ], temperature: 0.3, label,
         });
         results.push({ goal: subStep.goal, output: r.text?.trim() || '' });
       } else if (subStep.action.startsWith('tool:')) {
-        const toolName = subStep.action.slice(5);
+        let toolName = subStep.action.slice(5);
         // 子步骤提供模板/默认值，用户参数覆盖同名默认值；占位符用用户参数插值
         const rawParams = { ...(subStep.params ?? {}), ...params };
-        const callParams = this.interpolateParams(rawParams, params ?? {});
+        let callParams = this.interpolateParams(rawParams, params ?? {});
+        // 技能治愈：历史蒸馏的技能常固化 http_get+query（无 url，源自失败运行）——搜索意图改道 news_search
+        if (toolName === 'http_get' && !callParams.url) {
+          const q = callParams.query ?? callParams.keyword ?? callParams.search_query ?? callParams.q ?? callParams.topic;
+          if (q) {
+            toolName = 'news_search';
+            callParams = { query: String(q), maxResults: callParams.max_results ?? callParams.maxResults ?? 8 };
+          }
+        }
         const r = await this.tools.call(toolName, callParams, { taskId: label });
         results.push({ goal: subStep.goal, output: r.output });
       }
@@ -407,12 +482,16 @@ export class AgentExecutor {
         let action = String(s.action ?? '');
         if (/^tool:/.test(action)) {
           const toolName = action.slice(5);
-          // 泛化重写：未注册名经别名表解析（search→news_search、read_file→fs_read、get_weather→skill:get_weather…）
+          // 泛化重写：未注册名先查技能池（LLM 常漏 skill: 前缀裸用技能名），再走别名表解析
           if (toolName.startsWith('skill:')) {
             /* 技能调用格式已正确 */
           } else if (!this.tools.get(toolName)) {
-            const resolved = this.tools.resolve(toolName);
-            if (resolved) action = `tool:${resolved}`;
+            const asSkill = (this.skills?.active() ?? []).find((s) => s.name === toolName);
+            if (asSkill) action = `tool:skill:${toolName}`;
+            else {
+              const resolved = this.tools.resolve(toolName);
+              if (resolved) action = `tool:${resolved}`;
+            }
           }
         }
         return {
@@ -443,14 +522,16 @@ export class AgentExecutor {
   }
 
   async judgeOutcome(input, answer, label = 'judge') {
-    // 结论多在末尾（推导/列表/代码），纯头部截断会漏判：取头 300 + 尾 300
+    // 结论多在末尾（推导/列表/代码），纯头部截断会漏判：取头 600 + 尾 500
+    // （列表型交付物条目多，截太狠判定器看不到完整内容会误判 FAIL）
     const a = String(answer ?? '');
-    const shown = a.length > 700 ? `${a.slice(0, 300)}\n……\n${a.slice(-300)}` : a;
+    const shown = a.length > 1100 ? `${a.slice(0, 600)}\n……\n${a.slice(-500)}` : a;
     const r = await judge({
       system: '你是任务结果审查器，判断回答是否交付了任务的最终目标（最终交付物，如答案/结果/结论/内容本身）。回答无需展示中间过程（代码细节/工具调用过程/推理步骤）——只要最终交付物正确且切题即为 SUCCESS。回答含公式/代码/markdown 格式属正常。',
       question: `任务：「${input.slice(0, 200)}」\n回答：「${shown}」\n回答是否成功完成任务？`,
       options: ['SUCCESS', 'FAIL'],
       label,
+      samples: 1, // 任务成败判定低风险：单采样省配额（净化决策才需双采样）
     });
     // abstain 宽容化：无法裁决且回答有实质内容（≥8 字符，简短正确答案如"1060"类也能过）时不判死
     if (r.abstain) {
