@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DATA_HOME = process.env.SPA_DATA_HOME ?? join(homedir(), '.self-evolve');
@@ -92,7 +92,8 @@ if (!existsSync(CFG_PATH) && !process.env.SPA_API_KEY) {
 }
 const url = `http://localhost:${port}`;
 try {
-  const { startWeb } = await import(join(ROOT, 'web.js'));
+  // Windows 上 ESM 动态 import 须用 file:// URL（裸 C:\ 路径会被解析为 'c:' 协议）
+  const { startWeb } = await import(pathToFileURL(join(ROOT, 'web.js')).href);
   await startWeb({ port });
   console.log(`\n  ➜ 对话界面: ${url}   （Ctrl+C 退出）`);
   if (!noOpen && process.stdin.isTTY) {
