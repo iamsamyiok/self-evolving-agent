@@ -85,7 +85,7 @@ export class AutoControl {
     const last = store.getState('tuned_retrieval_last', null);
 
     // 任务成功率信号（最近 20 个任务）
-    const tasks = store.db.prepare('SELECT outcome FROM tasks ORDER BY created_at DESC LIMIT 20').all();
+    const tasks = store.db.prepare("SELECT outcome FROM tasks WHERE status != 'running' ORDER BY created_at DESC LIMIT 20").all();
     if (tasks.length < 10) return { skipped: 'insufficient_tasks' };
     const successRate = tasks.filter((t) => t.outcome === 'SUCCESS').length / tasks.length;
     const prevRate = store.getState('task_success_ema', successRate);
@@ -216,7 +216,7 @@ export class AutoControl {
     const store = this.store;
     const alerts = [];
     // 任务成功率 7 日窗口回撤 >5pp（用最近任务 EMA 近似）
-    const tasks = store.db.prepare('SELECT outcome, created_at FROM tasks ORDER BY created_at DESC LIMIT 100').all();
+    const tasks = store.db.prepare("SELECT outcome, created_at FROM tasks WHERE status != 'running' ORDER BY created_at DESC LIMIT 100").all();
     if (tasks.length >= 20) {
       const half = Math.floor(tasks.length / 2);
       const newer = tasks.slice(0, half), older = tasks.slice(half);

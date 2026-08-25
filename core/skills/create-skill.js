@@ -10,6 +10,11 @@ export async function createSkill(params, { store }) {
   const id = randomUUID();
   const now = Date.now();
   const name = String(target_name || `skill_${Date.now()}`).slice(0, 60);
+  // 同名防护：非隔离区已有同名技能 → 拒绝（planner 按名解析技能，重名会导致命中混淆/坏技能顶替好技能）
+  const dup = store.db.prepare("SELECT id, state FROM skills WHERE name = ? AND state NOT IN ('QUARANTINED','REJECTED') LIMIT 1").get(name);
+  if (dup) {
+    return { output: `技能名「${name}」已存在（状态 ${dup.state}，ID ${dup.id}）。请换一个名字，或先在观测面板处理同名技能。` };
+  }
   const scenarioStr = String(scenario).slice(0, 200);
   const descStr = String(description).slice(0, 300);
   const stepsJson = JSON.stringify(Array.isArray(steps) ? steps.slice(0, 8) : []);

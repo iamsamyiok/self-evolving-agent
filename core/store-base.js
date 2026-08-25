@@ -101,6 +101,7 @@ export class Store {
     }
     this.migrateV2();
     this.migrateV3();
+    this.migrateV4();
   }
 
   /** v2：增量列（幂等，SQLite 无 IF NOT EXISTS 的 ADD COLUMN 用 pragma 守卫） */
@@ -129,6 +130,36 @@ export class Store {
       this.db.exec('ALTER TABLE skills ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0');
     }
     this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)').run(Date.now());
+  }
+
+  /** v4：技能版本快照表（污染回滚用）+ tasks 生命周期状态（重启中断恢复用） */
+  migrateV4() {
+    const applied = this.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v ?? 1;
+    if (applied >= 4) return;
+    const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((t) => t.name);
+    if (!tables.includes('skill_versions')) {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS skill_versions (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        name TEXT, scenario TEXT, description TEXT, steps TEXT,
+        quality_score REAL, success_count INTEGER, fail_count INTEGER,
+        snapshot_at INTEGER NOT NULL,
+        reason TEXT
+      )`);
+    }
+    const tcols = this.db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
+    if (!tcols.includes('status')) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'done'");
+    }
+    this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)').run(Date.now());
+  }
+
+  /** 启动恢复：上次运行中未完成的任务标记为 interrupted（会话端如实展示，进化钩子不补跑） */
+  markInterruptedTasks() {
+    if (!this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").get()) return 0;
+    const r = this.db.prepare("UPDATE tasks SET status = 'interrupted', error = COALESCE(error, '服务重启，任务中断') WHERE status = 'running'").run();
+    return r.changes;
   }
 
   // ── system_state ──
@@ -327,7 +358,7 @@ export class Store {
       s[type].total = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
     }
     s.purge_logs = this.db.prepare("SELECT COUNT(*) AS n FROM purge_logs WHERE status != 'ROLLED_BACK'").get().n;
-    s.tasks = this.db.prepare("SELECT outcome, COUNT(*) AS n FROM tasks GROUP BY outcome").all()
+    s.tasks = this.db.prepare("SELECT outcome, COUNT(*) AS n FROM tasks WHERE status != 'running' GROUP BY outcome").all()
       .reduce((acc, r) => { acc[r.outcome] = r.n; return acc; }, {});
     s.golden = this.db.prepare('SELECT COUNT(*) AS n FROM golden_tasks WHERE enabled = 1').get().n;
     return s;

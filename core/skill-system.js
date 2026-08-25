@@ -122,6 +122,7 @@ export class SkillSystem {
     if (rate >= 2 / matched.length) { // ≥ 2/3 通过即晋升门禁线（MVP 基线：无技能基线约为同水平）
       const row = this.store.get('skill', skillId);
       this.store.transition('skill', skillId, 'ACTIVE', { verified: 1 });
+      this.snapshotSkill(skillId, 'promoted_baseline'); // 晋升时刻快照 = 已验证起点版本（后续污染回滚锚点）
       return { status: 'promoted', rate };
     }
     const attempts = (this.store.getState(`skill_gate_attempts:${skillId}`, 0)) + 1;
@@ -150,6 +151,9 @@ export class SkillSystem {
       // 快速熔断：连续 2 次失败立即 COOLING（不等 Wilson 收敛——坏技能每多跑一次都是浪费的 LLM 调用）
       const streakField = { fail_streak: ok ? 0 : (s.fail_streak ?? 0) + 1 };
       if (!ok && streakField.fail_streak >= 2) {
+        this.snapshotSkill(skillId, 'streak_cooling'); // 熔断前留存证据快照
+        // 污染回滚：若存在质量显著更优的历史版本（ΔQ≥0.15），恢复其内容并重置计数，替代 COOLING
+        if (this.tryRollback(skillId)) return;
         this.store.bumpStats('skill', skillId, { ...fields, ...streakField });
         this.store.transition('skill', skillId, 'COOLING');
         this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'STREAK_COOLING', dimension: 'quality', reason: '连续 2 次执行失败，快速熔断进 COOLING（防坏技能持续浪费调用）', evidence: { fail_streak: streakField.fail_streak }, status: 'DONE' });
@@ -176,6 +180,54 @@ export class SkillSystem {
     const ageDays = Math.max(0.5, (Date.now() - s.created_at) / 86_400_000);
     const ratePerDay = s.execution_count / ageDays;
     return Math.round(ratePerDay * days);
+  }
+
+  /** 版本快照：状态转换前留存内容证据（污染回滚的依据源） */
+  snapshotSkill(skillId, reason) {
+    const s = this.store.get('skill', skillId);
+    if (!s) return null;
+    try {
+      this.store.db.prepare(
+        `INSERT INTO skill_versions (id, skill_id, version, name, scenario, description, steps, quality_score, success_count, fail_count, snapshot_at, reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(uuid7(), skillId, s.version ?? 1, s.name, s.scenario, s.description, s.steps,
+        s.quality_score ?? 0.5, s.success_count ?? 0, s.fail_count ?? 0, Date.now(), String(reason ?? '').slice(0, 120));
+    } catch { /* 快照失败不阻塞主流程 */ }
+    return true;
+  }
+
+  /** 污染回滚：存在质量显著更优的历史版本（ΔQ ≥ 0.15 且历史 Q ≥ 0.5）则恢复内容并重置计数。
+   *  返回回滚到的版本号，无可回滚返回 0。回滚后回 ACTIVE 以干净证据重新积累。 */
+  tryRollback(skillId) {
+    const s = this.store.get('skill', skillId);
+    if (!s) return 0;
+    let snaps;
+    try { snaps = this.store.db.prepare('SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY quality_score DESC').all(skillId); }
+    catch { return 0; } // 旧库无表
+    const best = snaps.find((v) => (v.quality_score ?? 0) - (s.quality_score ?? 0) >= 0.15 && (v.quality_score ?? 0) >= 0.5);
+    if (!best) return 0;
+    this.store.db.prepare(
+      `UPDATE skills SET name = ?, scenario = ?, description = ?, steps = ?, quality_score = 0.5,
+        success_count = 0, fail_count = 0, execution_count = 0, fail_streak = 0, verified = 1, updated_at = ? WHERE id = ?`
+    ).run(best.name, best.scenario, best.description, best.steps, Date.now(), skillId);
+    if (s.state !== 'ACTIVE') this.store.transition('skill', skillId, 'ACTIVE', { rolled_back_to: best.version }); // 回滚后以干净证据重新积累（本就 ACTIVE 则无需迁移）
+    this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'ROLLBACK', dimension: 'quality', reason: `连续失败触发污染回滚：恢复历史版本 v${best.version}（Q ${best.quality_score.toFixed(2)} > 当前 ${((s.quality_score ?? 0)).toFixed(2)}），计数重置`, evidence: { restored_version: best.version, restored_q: best.quality_score, prev_q: s.quality_score }, status: 'DONE' });
+    return best.version;
+  }
+
+  /** 手动回滚（dashboard/API）：指定技能恢复到质量最优历史版本 */
+  rollbackManually(skillId) {
+    const s = this.store.get('skill', skillId);
+    if (!s) return { ok: false, reason: 'not_found' };
+    this.snapshotSkill(skillId, 'manual_rollback');
+    const v = this.tryRollback(skillId);
+    return v ? { ok: true, restored_version: v } : { ok: false, reason: 'no_better_snapshot' };
+  }
+
+  /** 版本历史查询（dashboard 用） */
+  versions(skillId) {
+    try { return this.store.db.prepare('SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY snapshot_at DESC LIMIT 50').all(skillId); }
+    catch { return []; }
   }
 
   /** 检索：供 L6 上下文装配（权重可调参，默认 §3.4-4）；走缓存索引，cold 热度条目过滤 */

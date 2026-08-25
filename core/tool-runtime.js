@@ -3,6 +3,8 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs';
 import { isAbsolute, resolve, join, relative, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { lookup } from 'node:dns';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
@@ -44,6 +46,60 @@ async function assertPublicHost(hostname) {
   }
 }
 
+/** 校验型 lookup（TOCTOU 消除）：net/tls 建连时解析 → 校验 → 把同一结果交给连接使用。
+ *  校验（assertPublicHost）与连接（本函数）各自解析的传统方案存在重绑定窗口：两次解析之间 DNS 可换 IP。
+ *  这里连接直接消费校验过的地址，攻击窗口归零。注意 net 会以 {all:true} 调用并要求数组形式回调。 */
+function guardLookup(hostname, options, callback) {
+  const wantAll = !!(options && options.all);
+  lookupAll(hostname, { ...options, all: true }, (err, ips) => {
+    if (err) return callback(err);
+    const safe = [];
+    for (const { address, family } of Array.isArray(ips) ? ips : []) {
+      if (isPrivateIp(address)) {
+        const e = new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问`);
+        e.code = 'ERR_SSRF_BLOCKED';
+        return callback(e);
+      }
+      safe.push({ address, family });
+    }
+    if (!safe.length) return callback(new Error(`域名无可用解析记录：${hostname}`));
+    if (wantAll) return callback(null, safe); // net {all:true} 形式：返回过滤后的完整数组
+    const { address, family } = safe[0]; // 传统三参形式
+    return callback(null, address, family);
+  });
+}
+
+/** node:http(s) GET（手动重定向控制 + 同源 IP 校验 + 流式 64KB 截断） */
+function rawGet(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const fn = u.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = fn(url, {
+      lookup: guardLookup,
+      timeout: timeoutMs,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; evo-agent/1.0)',
+        Accept: 'text/html,application/json,text/plain,*/*',
+        'Accept-Encoding': 'identity', // 免 gzip 解压（零依赖约束）
+      },
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        size += c.length;
+        if (size <= 65_536) chunks.push(c);
+        else res.destroy(); // 超限即断流（已收集足够内容）
+      });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') }));
+      res.on('error', () => resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') })); // 截断断流按已收内容处理
+    });
+    req.on('timeout', () => req.destroy(new Error(`请求超时（${timeoutMs}ms）`)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** 路径囚禁：解析后必须落在 sandbox 根内（防 ../ 与绝对路径逃逸） */
 function confine(p, root) {
   const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
@@ -59,7 +115,7 @@ function confine(p, root) {
 }
 
 /** 导出供单元测试（tests/unit/ssrf.test.js） */
-export { isPrivateIp, assertPublicHost };
+export { isPrivateIp, assertPublicHost, guardLookup };
 
 export class ToolRuntime {
   /** LLM 常见幻觉工具名 → 真实注册名的模糊映射（规划器宽容层） */
@@ -199,23 +255,20 @@ export class ToolRuntime {
         return { ok: true };
       },
       run: async (p) => {
-        // 逐跳抓取：redirect:manual + 每跳解析域名并校验 IP——
-        // 正则拦不住数字 IP（2130706433=127.0.0.1）/DNS 重绑定/::ffff: 映射/公网 302 跳私网
+        // 逐跳抓取（TOCTOU 消除版）：node:http + guardLookup —— DNS 校验与建连消费同一次解析结果；
+        // 公网 302 跳私网在每一跳都会被 guardLookup 拦截
         let url = String(p.url), res = null;
         for (let hop = 0; hop <= 3; hop++) {
           const u = new URL(url);
-          await assertPublicHost(u.hostname); // 解析全部 A/AAAA 记录逐个校验，命中私网即拒绝
-          const ac = new AbortController();
-          const timer = setTimeout(() => ac.abort(), CONFIG.TOOL_TIMEOUT_MS);
+          await assertPublicHost(u.hostname); // 快速失败层：解析后立即校验，给出清晰错误（真正防线在 guardLookup）
           try {
-            res = await fetch(url, {
-              signal: ac.signal,
-              redirect: 'manual',
-              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; evo-agent/1.0)', Accept: 'text/html,application/json,text/plain,*/*' },
-            });
-          } finally { clearTimeout(timer); }
+            res = await rawGet(url, CONFIG.TOOL_TIMEOUT_MS);
+          } catch (e) {
+            if (e?.code === 'ERR_SSRF_BLOCKED') throw new Error(e.message);
+            throw new Error(`请求失败：${String(e?.message ?? e).slice(0, 120)}`);
+          }
           if ([301, 302, 303, 307, 308].includes(res.status)) {
-            const loc = res.headers.get('location');
+            const loc = res.headers.location;
             if (!loc || hop === 3) throw new Error('重定向次数超限（>3）或缺少 Location');
             url = new URL(loc, url).href;
             continue;
@@ -223,8 +276,8 @@ export class ToolRuntime {
           break;
         }
         try {
-          let text = (await res.text()).slice(0, 65_536);
-          const ct = res.headers.get('content-type') ?? '';
+          let text = res.text.slice(0, 65_536);
+          const ct = String(res.headers['content-type'] ?? '');
           if (ct.includes('html')) {
             // HTML 粗提取：title + meta 描述 + 正文文本（去脚本样式标签）
             const title = text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';

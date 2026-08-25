@@ -85,7 +85,7 @@ export class WebServer {
         avgQ: rows.length ? Number((rows.reduce((a, r) => a + r.quality_score, 0) / rows.length).toFixed(3)) : null,
       };
     }
-    const tasks = store.db.prepare('SELECT outcome FROM tasks ORDER BY created_at DESC LIMIT 500').all();
+    const tasks = store.db.prepare("SELECT outcome FROM tasks WHERE status != 'running' ORDER BY created_at DESC LIMIT 500").all();
     const last20 = tasks.slice(0, 20).map((t) => (t.outcome === 'SUCCESS' ? 1 : 0));
     const successRate = tasks.length ? tasks.filter((t) => t.outcome === 'SUCCESS').length / tasks.length : null;
     const funnel = store.db.prepare("SELECT action, COUNT(*) AS n FROM purge_logs WHERE status = 'DONE' GROUP BY action").all()
@@ -235,6 +235,11 @@ export class WebServer {
         return send(200, this.importShare(b));
       }
       if (req.method === 'POST' && path === '/api/chat') return this.handleChat(req, res, await body());
+      // 技能版本历史 / 手动回滚（污染恢复运维入口）
+      const verMatch = path.match(/^\/api\/skills\/([\w-]+)\/versions$/);
+      if (verMatch && req.method === 'GET') return send(200, this.executor.skills.versions(verMatch[1]));
+      const rbMatch = path.match(/^\/api\/skills\/([\w-]+)\/rollback$/);
+      if (rbMatch && req.method === 'POST') return send(200, this.executor.skills.rollbackManually(rbMatch[1]));
       // 任务结果查询（断线重连恢复：任务结束落库后可凭 taskId 取回，未结束返回 pending）
       const taskMatch = path.match(/^\/api\/task\/([\w-]+)$/);
       if (taskMatch && req.method === 'GET') {
@@ -244,6 +249,9 @@ export class WebServer {
         if (live?.done) return send(200, { status: 'done', events: live.events, ...live.result });
         const row = this.store.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskMatch[1]);
         if (!row) return send(200, { status: 'pending' }); // 还在执行（结束才落库）
+        // 重启恢复：running 行已被启动扫描标记 interrupted —— 如实告知前端而非永远 pending
+        if (row.status === 'running') return send(200, { status: 'pending' });
+        if (row.status === 'interrupted') return send(200, { status: 'done', outcome: 'FAIL', basis: 'interrupted', answer: null, error: row.error ?? '服务重启，任务中断', durationMs: row.duration_ms, meta: null });
         const msg = this.store.db.prepare('SELECT meta FROM messages WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(row.id);
         return send(200, {
           status: row.outcome ? 'done' : 'pending',
@@ -452,6 +460,8 @@ export async function startWeb({ port = Number(process.env.SPA_WEB_PORT ?? 3789)
   };
 
   control.startupCheck();
+  const nInterrupted = store.markInterruptedTasks?.() ?? 0; // 上次运行的中断任务如实标记（重启恢复）
+  if (nInterrupted) console.log(`[web] 恢复完成：${nInterrupted} 个在途任务标记为已中断`);
   loop.start(); // 后台双循环：聊天期间持续净化（轻量 10min±抖动 / 深度每日+启动30s内一轮）
 
   const web = new WebServer({ store, executor, loop, control });

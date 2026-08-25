@@ -28,3 +28,31 @@ test('assertPublicHost：回环域名被拦截，公网域名放行', async () =
   await assert.rejects(() => assertPublicHost('127.0.0.1'), /私网/);
   await assert.doesNotReject(() => assertPublicHost('open.er-api.com'));
 });
+
+test('guardLookup：net all 形式回调返回过滤后数组，私网全拒', async () => {
+  const { guardLookup } = await import('../../core/tool-runtime.js');
+  await new Promise((done) => {
+    // net.connect 以 {all:true} 调用：回调须是 (err, [{address,family}])
+    guardLookup('localhost', { all: true, hints: 32 }, (err) => {
+      assert.match(String(err?.message), /私网|禁止访问/);
+      done();
+    });
+  });
+  await new Promise((done) => {
+    guardLookup('open.er-api.com', { all: true }, (err, addrs) => {
+      assert.equal(err, null);
+      assert.ok(Array.isArray(addrs) && addrs.length >= 1);
+      for (const a of addrs) assert.equal(isPrivateIp(a.address), false);
+      done();
+    });
+  });
+  await new Promise((done) => {
+    // 传统三参形式：回调 (err, address, family)
+    guardLookup('open.er-api.com', {}, (err, address, family) => {
+      assert.equal(err, null);
+      assert.equal(typeof address, 'string');
+      assert.ok(family === 4 || family === 6);
+      done();
+    });
+  });
+});
