@@ -120,11 +120,14 @@ export class MonitorView {
       }
       res.writeHead(404); res.end('not found');
     });
-    return new Promise((resolve) => this.server.listen(port, () => {
-      console.log(`[dashboard] http://127.0.0.1:${port}`);
-      this.startEventStream();
-      resolve(this.server);
-    }));
+    return new Promise((resolve, reject) => {
+      this.server.once('error', reject); // EADDRINUSE 等异步错误走事件抛出，不注册会 crash 进程
+      this.server.listen(port, () => {
+        console.log(`[dashboard] http://127.0.0.1:${port}`);
+        this.startEventStream();
+        resolve(this.server);
+      });
+    });
   }
 
   close() { this.server?.close(); }

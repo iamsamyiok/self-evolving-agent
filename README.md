@@ -1,6 +1,6 @@
 # self-purify-agent
 
-**自净化全自动进化 AI Agent —— 功能完整版（零依赖 Node.js）**
+**evo-agent · 自进化智能体 —— 功能完整版（零依赖 Node.js）**
 
 完整实现《自净化全自动进化AI Agent系统开发指导书（Node.js 生产级）v2.0》第一~三阶段：双闭环自进化/自净化、六维净化、六步净化管线、反振荡全套、安全宪法与工具沙箱、三层预算熔断、自动调参、看门狗、可视化面板、多 Agent 集群。
 
@@ -9,7 +9,22 @@
 - **不误杀**：Wilson 置信下界 + 最小证据 n≥5 + 48h 免疫期 + 迟滞带 + 变更率上限 + 复审翻案率度量
 - **不失控**：三层 token 预算熔断、安全宪法红线、工具沙箱、墓碑反再生、对抗计数、稳态断言、自动回滚
 
-## 快速开始
+## 安装（推荐）
+
+```bash
+npm i -g self-evolve
+self-evolve
+```
+
+首次运行自动进入配置向导（填一个 OpenAI 兼容的 API Key 即可），随后终端输出链接，点击进入对话界面；数据保存在 `~/.self-evolve/`。
+
+```bash
+self-evolve --api-key sk-xxx            # 非交互配置（CI/脚本）
+self-evolve --port 8080 --no-open       # 自定义端口，不自动开浏览器
+self-evolve --config                    # 重新配置
+```
+
+## 快速开始（源码运行）
 
 ```bash
 # 1. 配置 LLM（OpenAI 兼容任意后端）——编辑 config/local.json（已 gitignore）：

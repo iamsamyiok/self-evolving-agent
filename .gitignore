@@ -6,3 +6,4 @@ logs/
 config/local.json
 *.log
 env/.env
+*.tgz

@@ -1,18 +1,51 @@
 {
-  "name": "self-purify-agent",
-  "version": "1.0.1",
-  "description": "自净化全自动进化 AI Agent —— 功能完整版（零依赖 Node.js，指导书 v2.0 三阶段全实现）",
+  "name": "self-evolve",
+  "version": "1.5.0",
+  "description": "evo-agent · Self-Evolving AI Agent — skills/memories/experiences that evolve with every task. Zero dependencies. npm i -g self-evolve && self-evolve",
   "type": "module",
-  "private": true,
+  "license": "MIT",
   "engines": {
     "node": ">=22.13.0"
   },
   "bin": {
+    "self-evolve": "./bin/self-evolve.js",
     "spa": "./bin/spa.js"
   },
+  "files": [
+    "bin/",
+    "config/index.js",
+    "core/",
+    "service/",
+    "store/",
+    "tools/",
+    "utils/",
+    "web/",
+    "extend/",
+    "scripts/",
+    "web.js",
+    "tui.js",
+    "app.js",
+    "worker.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamsamyiok/self-evolving-agent.git"
+  },
+  "keywords": [
+    "ai-agent",
+    "self-evolving",
+    "self-improving",
+    "llm",
+    "agent",
+    "chatbot",
+    "tools",
+    "zero-dependency"
+  ],
   "scripts": {
-    "start": "node tui.js",
+    "start": "node bin/self-evolve.js",
     "web": "node web.js",
+    "tui": "node tui.js",
     "serve": "node app.js --serve",
     "watchdog": "node app.js --watchdog",
     "cluster": "node app.js --cluster 2",

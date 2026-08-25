@@ -1,16 +1,25 @@
 // config/index.js —— 唯一人工配置层（指导书 §4.1）
-// 三种来源按优先级：环境变量 > config/local.json（gitignore） > 内置默认值
-import { readFileSync, existsSync } from 'node:fs';
+// 三种来源按优先级：环境变量 > local.json（gitignore） > 内置默认值
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+// ── 运行形态判定 ──
+// 开发模式（仓库内有 config/local.json）：数据落仓库 data/，与历史行为一致
+// 安装模式（npm i -g 后无该文件）：数据/配置全落 ~/.self-evolve/，跨版本升级不丢、无需写权限
+export const IS_PACKAGED = !existsSync(join(ROOT, 'config', 'local.json'));
+export const DATA_HOME = process.env.SPA_DATA_HOME ?? join(homedir(), '.self-evolve');
+
 let local = {};
-const localPath = join(ROOT, 'config', 'local.json');
+const localPath = IS_PACKAGED ? join(DATA_HOME, 'local.json') : join(ROOT, 'config', 'local.json');
+if (IS_PACKAGED) mkdirSync(DATA_HOME, { recursive: true });
 if (existsSync(localPath)) {
   try { local = JSON.parse(readFileSync(localPath, 'utf8')); } catch { /* 坏配置忽略，走默认 */ }
 }
+export { localPath };
 
 const env = process.env;
 
@@ -46,7 +55,7 @@ export const CONFIG = {
 
   // ── 运行模式 ──
   MOCK: (env.SPA_MOCK ?? local.MOCK ?? '0') === '1',
-  DATA_DIR: env.SPA_DATA_DIR ?? local.DATA_DIR ?? join(ROOT, 'data'),
+  DATA_DIR: env.SPA_DATA_DIR ?? local.DATA_DIR ?? (IS_PACKAGED ? DATA_HOME : join(ROOT, 'data')),
   ROOT,
   // 访问鉴权：设置 SPA_AUTH_TOKEN 后所有 /api/* 需携带 Authorization: Bearer <token>；空则完全开放（本地/单人使用）
   AUTH_TOKEN: env.SPA_AUTH_TOKEN ?? local.AUTH_TOKEN ?? '',
@@ -97,7 +106,7 @@ export const CONFIG = {
 
   // ── 工具沙箱（§8.2/§9.2）──
   TOOLS_ENABLED: (env.SPA_TOOLS ?? local.TOOLS_ENABLED ?? '1') === '1',
-  TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? join(ROOT, 'data', 'workspace'),
+  TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? local.TOOL_WORKSPACE ?? (IS_PACKAGED ? join(DATA_HOME, 'workspace') : join(ROOT, 'data', 'workspace')),
   TOOL_TIMEOUT_MS: 15_000,
   TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? local.TOOL_SHELL_ENABLED ?? '1') === '1', // 默认启用命令行工具
   TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn', 'api.anysearch.com', 'news.google.com']),

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG } from './config/index.js';
+import { CONFIG, localPath } from './config/index.js';
 import { Store, uuid7 } from './core/store-base.js';
 import { AgentExecutor } from './core/agent-executor.js';
 import { PurifyCenter } from './core/purify-center.js';
@@ -20,7 +20,7 @@ export class WebServer {
   /** 活动任务注册表：taskId → { events, done, result, at }。断流后轮询取实时进度 */
   static liveTasks = new Map();
 
-  constructor({ store, executor, loop, control, configPath = join(ROOT, 'config', 'local.json') }) {
+  constructor({ store, executor, loop, control, configPath = localPath }) {
     this.store = store;
     this.executor = executor;
     this.loop = loop;
@@ -421,7 +421,10 @@ export class WebServer {
     this.server.requestTimeout = 0;
     this.server.headersTimeout = 0;
     this.server.keepAliveTimeout = 72_000;
-    return new Promise((resolve) => this.server.listen(port, () => resolve(this.server)));
+    return new Promise((resolve, reject) => {
+      this.server.once('error', reject); // 端口占用等异步错误：reject 交给调用方处理而非 crash
+      this.server.listen(port, () => resolve(this.server));
+    });
   }
   close() { this.server?.close(); }
 
