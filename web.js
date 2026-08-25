@@ -1,7 +1,7 @@
 // web.js —— ChatGPT 式 Web 界面入口：对话即任务，每轮自动进化，后台持续净化
 // 端口默认 3789（SPA_WEB_PORT 可改）；同时挂观测面板（3790，SPA_DASHBOARD_PORT）
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG } from './config/index.js';
@@ -61,7 +61,10 @@ export class WebServer {
 
   messages(convId) {
     return this.store.db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 500').all(convId)
-      .map((m) => ({ id: m.id, role: m.role, content: m.content, meta: m.meta ? JSON.parse(m.meta) : null, createdAt: m.created_at }));
+      .map((m) => {
+        const meta = m.meta ? JSON.parse(m.meta) : null;
+        return { id: m.id, role: m.role, content: m.content, meta, images: Array.isArray(meta?.images) ? meta.images : undefined, createdAt: m.created_at };
+      });
   }
 
   addMessage(convId, role, content, { taskId = null, meta = null } = {}) {
@@ -121,7 +124,7 @@ export class WebServer {
     return { baseUrl: eff.baseUrl, model: eff.model, apiKeyMasked: maskKey(eff.apiKey), configured: Boolean(eff.apiKey) || CONFIG.MOCK, mock: CONFIG.MOCK, toolbox: this.getUserToolbox() };
   }
   getUserToolbox() {
-    return this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
+    return this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true, shell: true });
   }
 
   saveConfig({ baseUrl, apiKey, model }) {
@@ -176,6 +179,20 @@ export class WebServer {
         return send(200, r);
       }
       if (req.method === 'GET' && path === '/api/state') return send(200, this.state());
+      // 上传图片静态服务（仅 uploads 目录、仅图片扩展名、文件名白名单字符校验）
+      const upMatch = path.match(/^\/api\/uploads\/([\w.-]+)$/);
+      if (upMatch && req.method === 'GET') {
+        const name = upMatch[1];
+        if (!/^\w[\w.-]*$/.test(name) || !/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)) {
+          res.writeHead(400); return res.end('bad request');
+        }
+        const file = join(CONFIG.TOOL_WORKSPACE, 'uploads', name);
+        if (!existsSync(file)) { res.writeHead(404); return res.end('not found'); }
+        const ext = name.split('.').pop().toLowerCase();
+        const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml' }[ext] ?? 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'public, max-age=86400' });
+        return res.end(readFileSync(file));
+      }
       if (req.method === 'GET' && path === '/api/conversations') return send(200, this.conversations());
       if (req.method === 'POST' && path === '/api/conversations') {
         const b = await body();
@@ -276,14 +293,38 @@ export class WebServer {
     }
   }
 
-  /** 流式对话：NDJSON 事件流（conversation / stage / done / error） */
-  async handleChat(req, res, { conversationId, content, quick = false }) {
-    if (!content || !String(content).trim()) {
+  /** 流式对话：NDJSON 事件流（conversation / stage / done / error）。images: dataURL 数组（多模态输入，≤4 张） */
+  async handleChat(req, res, { conversationId, content, quick = false, images = [] }) {
+    // 图片校验与收口：仅收 data:image/* 且单张 ≤6MB、最多 4 张（防超大 payload 撑爆库/LLM 请求）
+    const imgs = (Array.isArray(images) ? images : [])
+      .filter((u) => typeof u === 'string' && /^data:image\/[\w.+-]+;base64,/.test(u) && u.length <= 8_000_000)
+      .slice(0, 4);
+    if ((!content || !String(content).trim()) && !imgs.length) {
       res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
       return res.end(JSON.stringify({ type: 'error', error: '消息为空' }) + '\n');
     }
+    if (!content || !String(content).trim()) content = '请分析这张图片（OCR 文字提取 + 视觉理解）';
     content = String(content).slice(0, 8000);
-    const ub = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true });
+    // 图片落盘沙箱（fs 工具可达；上下文注入文件路径供工具类步骤引用）
+    let savedPaths = [];
+    if (imgs.length) {
+      try {
+        const uploadDir = join(CONFIG.TOOL_WORKSPACE, 'uploads');
+        mkdirSync(uploadDir, { recursive: true });
+        savedPaths = imgs.map((dataUrl, i) => {
+          const m = dataUrl.match(/^data:(image\/[\w.+-]+);base64,(.+)$/s);
+          if (!m) return null;
+          const ext = m[1].split('/')[1].replace('jpeg', 'jpg').split('+')[0];
+          const name = `img-${Date.now()}-${i}.${ext}`;
+          writeFileSync(join(uploadDir, name), Buffer.from(m[2], 'base64'));
+          return `uploads/${name}`;
+        }).filter(Boolean);
+      } catch { /* 落盘失败不阻塞对话（LLM 仍可经 image_url 看图） */ }
+    }
+    if (savedPaths.length) {
+      content += `\n\n【附带图片】${savedPaths.length} 张已存入沙箱：${savedPaths.join('、')}（可用 fs_read/edit_file 处理；视觉分析直接基于消息中的图片完成）`;
+    }
+    const ub = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true, shell: true });
     if (!CONFIG.TOOLS_ENABLED) {
       res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
       return res.end(JSON.stringify({ type: 'error', error: '全局工具已禁用（TOOL_ENABLED=0），仅允许 reason/answer 步骤' }) + '\n');
@@ -316,8 +357,8 @@ export class WebServer {
       send({ type: 'conversation', conversation: conv });
     }
 
-    // 落库用户消息 + 组装对话上下文（最近 6 条）
-    const userMsgId = this.addMessage(conv.id, 'user', content);
+    // 落库用户消息（meta 携带图片 URL 引用而非 dataURL，防历史接口膨胀）+ 组装对话上下文（最近 6 条）
+    const userMsgId = this.addMessage(conv.id, 'user', content, { meta: savedPaths.length ? { images: savedPaths.map((p) => `/api/uploads/${p.split('/').pop()}`) } : null });
     const recent = this.store.db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 7').all(conv.id).reverse()
       .filter((m) => m.id !== userMsgId);
     const input = recent.length
@@ -341,6 +382,7 @@ export class WebServer {
         quick,
         silent: true,
         taskId,
+        images: imgs, // 多模态：dataURL 随任务下发（quick/planner/step/final 用户消息组装 image_url）
         conversationId: conv.id, // 会话隔离：记忆检索本会话加权、沉淀记忆携带会话标签
         isAborted: () => live.abort === true, // 停止端点置位 → LLM 等待/排队/步骤边界协作式中断
         onProgress: (e) => {

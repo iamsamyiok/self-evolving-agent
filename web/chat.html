@@ -101,13 +101,21 @@ header h1{font-size:15px;font-weight:600;flex:1;white-space:nowrap;overflow:hidd
 .err{color:var(--bad);font-size:14px}
 /* 输入区：ChatGPT 式大圆角输入框 + 圆形发送 */
 footer{padding:8px 16px 16px;background:var(--bg)}
-.inbox{max-width:760px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;background:#fff;border:1px solid var(--line);border-radius:26px;padding:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.inbox{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid var(--line);border-radius:26px;padding:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
 .inbox:focus-within{border-color:#c5c5d2}
+.inbox-top{display:flex;gap:10px;align-items:flex-end}
 textarea{flex:1;background:none;border:none;color:var(--txt);font-size:15px;font-family:inherit;resize:none;outline:none;max-height:180px;line-height:1.55}
 #sendBtn{width:34px;height:34px;border-radius:50%;border:none;background:var(--acc);color:#fff;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s}
 #sendBtn:disabled{opacity:.35;cursor:default}
 #sendBtn.stop{background:#666;font-size:12px}
 #sendBtn:not(:disabled):hover{filter:brightness(1.15)}
+.img-preview{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0}
+.img-preview .img-item{position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+.img-preview .img-item img{width:100%;height:100%;object-fit:cover}
+.img-preview .img-item .remove{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:10px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.img-preview .img-item .remove:hover{background:rgba(239,68,68,.8)}
+.attach-btn{background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:12px;color:var(--dim);cursor:pointer;display:flex;align-items:center;gap:4px}
+.attach-btn:hover{border-color:var(--acc);color:var(--acc)}
 .hint{max-width:760px;margin:6px auto 0;text-align:center;font-size:11px;color:var(--dim)}
 /* 欢迎页 */
 #welcome{text-align:center;padding:48px 20px 0}
@@ -183,8 +191,13 @@ aside.evo h3:first-child{margin-top:0}
     </div></div>
     <footer>
       <div class="inbox">
-        <textarea id="ta" rows="1" placeholder="输入消息…"></textarea>
-        <button id="sendBtn" onclick="doSend()" title="发送">↑</button>
+        <div class="img-preview" id="imgPreview"></div>
+        <div class="inbox-top">
+          <input type="file" id="imgInput" accept="image/*" multiple style="display:none" onchange="handleImageUpload(event)">
+          <button class="attach-btn" onclick="document.getElementById('imgInput').click()" title="上传图片">🖼 图片</button>
+          <textarea id="ta" rows="1" placeholder="输入消息…（可附带图片）"></textarea>
+          <button id="sendBtn" onclick="doSend()" title="发送">↑</button>
+        </div>
       </div>
       <div class="hint">对话即任务 · 规划 → 执行 → 判定 → 沉淀进化</div>
     </footer>
@@ -211,7 +224,10 @@ aside.evo h3:first-child{margin-top:0}
         <input type="checkbox" id="tbNetwork" onchange="_toolbox.network=this.checked"> 联网搜索（http_get）
       </label>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:6px 0">
-        <input type="checkbox" id="tbFileio" onchange="_toolbox.fileio=this.checked"> 沙箱文件读写（fs_read/write/list）
+        <input type="checkbox" id="tbFileio" onchange="_toolbox.fileio=this.checked"> 沙箱文件读写/编辑（fs_read/write/edit_file/list）
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:6px 0">
+        <input type="checkbox" id="tbShell" onchange="_toolbox.shell=this.checked"> 命令行执行（shell，默认启用）
       </label>
       <div id="toolTipBox" style="font-size:12px;color:var(--dim);margin:6px 0 2px"></div>
       <div class="mbtns">
@@ -241,11 +257,17 @@ aside.evo h3:first-child{margin-top:0}
 'use strict';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={convs:[],convId:null,sending:false,evoOpen:false};
+const state={convs:[],convId:null,sending:false,evoOpen:false,attachedImages:[]};
 
 /* ── markdown-lite ── */
 function md(s){
   s=esc(s);
+  // 图片 URL 渲染（base64 或 http/https）
+  s=s.replace(/(!\[[^\]]*\]\(([^)]+)\))|((https?:\/\/[^\s<>"']+\.(?:png|jpg|jpeg|gif|png|webp)(\?[^\s<>"']*)?))/g, (m, fullImg, alt, url) => {
+    const src = url || alt;
+    const altText = alt ? alt.replace(/[*_`]/g, '') : '图片';
+    return `<img src="${src}" alt="${altText}" style="max-width:100%;max-height:400px;border-radius:8px;margin:8px 0;border:1px solid var(--line)" loading="lazy">`;
+  });
   s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<pre>'+c.replace(/\n$/,'')+'</pre>');
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
@@ -363,7 +385,13 @@ function renderMsg(m){
   const t=$('thread')||((el=>{el.id='thread';$('msgWrap').appendChild(el);return el;})(document.createElement('div')));
   if(m.role==='user'){
     const d=document.createElement('div');d.className='msg user';
-    d.innerHTML=`<div class="bub">${esc(m.content)}</div>`;t.appendChild(d);
+    let html=`<div class="bub">`;
+    if(m.images?.length){
+      html+=m.images.map(src=>`<img src="${esc(src)}" style="max-width:200px;max-height:200px;border-radius:8px;margin:4px;border:1px solid var(--line)">`).join('');
+    }
+    html+=esc(m.content).replace(/\[图片 ×\d+\]\n?/g,'').replace(/\n/g,'<br>');
+    html+=`</div>`;
+    d.innerHTML=html;t.appendChild(d);
   }else{
     const d=document.createElement('div');d.className='msg ai';
     d.innerHTML=`<div class="ai-av">♻</div><div class="body">${aiHtml(m.meta?.thinkingHtml||m.meta?.thinking||'',m.content,m.meta)}</div>`;
@@ -462,6 +490,23 @@ function makeExecView(container){
   };
 }
 
+/* ── 图片上传处理 ── */
+function handleImageUpload(event){
+  const files=[...event.target.files];
+  event.target.value='';
+  files.forEach(f=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const dataUrl=e.target.result;
+      state.attachedImages.push(dataUrl);
+      const div=document.createElement('div');div.className='img-item';
+      div.innerHTML=`<img src="${dataUrl}"><button class="remove" onclick="this.parentElement.remove()">✕</button>`;
+      $('imgPreview').appendChild(div);
+    };
+    reader.readAsDataURL(f);
+  });
+}
+
 /* ── 发送（NDJSON 流式 + 实时动作 + 断线恢复 + 可停止）── */
 let activeAC=null; // 当前任务的 AbortController（停止时掐断 fetch 流）
 let activeTaskId=null; // 当前活动 taskId（停止时通知后端协作式中断）
@@ -482,11 +527,15 @@ function stopActive(){
 async function doSend(){
   if(state.sending){stopActive();return;} // 发送中点击 = 停止
   const content=$('ta').value.trim();
-  if(!content)return;
+  const images=[...state.attachedImages];
+  state.attachedImages=[];
+  $('imgPreview').innerHTML='';
+  if(!content&&images.length===0)return;
+  const displayContent=images.length?`[图片 ×${images.length}]\n${content||''}`:content;
   state.sending=true;$('ta').value='';$('ta').style.height='auto';
   setSendingUI(true);
   userStopped=false;activeTaskId=null;activeAC=new AbortController();
-  renderMsg({role:'user',content});
+  renderMsg({role:'user',content:displayContent,images});
   $('welcome')?.remove();
   const d=document.createElement('div');d.className='msg ai';
   const wrap=($('thread')||(() =>{const el=document.createElement('div');el.id='thread';$('msgWrap').appendChild(el);return el;})());
@@ -530,7 +579,7 @@ async function doSend(){
     refreshEvoPill();
   };
   try{
-    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content}),signal:activeAC?.signal});
+    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content,images}),signal:activeAC?.signal});
     const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
     while(true){
       const{done,value}=await reader.read();if(done)break;
@@ -588,7 +637,7 @@ async function doSend(){
 }
 
 /* ── 配置 ── */
-let _toolbox = { runtime: true, network: true, fileio: true };
+let _toolbox = { runtime: true, network: true, fileio: true, shell: true };
 async function openCfg(){
   const c=await (await fetch('/api/config')).json();
   $('cfgBase').value=c.baseUrl||'';$('cfgModel').value=c.model||'';
@@ -612,10 +661,10 @@ async function saveCfg(){
   closeModal('cfgModal');refreshLlmPill();syncToolboxUI();
 }
 function syncToolboxUI(){
-  const r=$('tbRuntime'),n=$('tbNetwork'),f=$('tbFileio');
-  if(r){r.checked=!!_toolbox.runtime;n.checked=!!_toolbox.network;f.checked=!!_toolbox.fileio;}
+  const r=$('tbRuntime'),n=$('tbNetwork'),f=$('tbFileio'),s=$('tbShell');
+  if(r){r.checked=!!_toolbox.runtime;n.checked=!!_toolbox.network;f.checked=!!_toolbox.fileio;s.checked=!!_toolbox.shell;}
 }
-function toolTip(el){el.title=_toolbox.runtime?'运行时/计算工具（calc、run_js）已启用，关闭则任务只能做搜索+推理，不能算/写码':''+(_toolbox.network?'网络工具（http_get）已启用，关闭则任务不能联网搜索':'')+(_toolbox.fileio?'文件读写已启用，关闭则任务不能读写沙箱文件':'')}
+function toolTip(el){el.title=_toolbox.runtime?'运行时/计算工具（calc、run_js）已启用，关闭则任务只能做搜索+推理，不能算/写码':''+(_toolbox.network?'网络工具（http_get）已启用，关闭则任务不能联网搜索':'')+(_toolbox.fileio?'文件读写/编辑已启用，关闭则任务不能读写沙箱文件':'')+(_toolbox.shell?'命令行执行已启用，关闭则任务不能执行 shell 命令':'')}
 
 /* ── 能力分享（社会化进化）── */
 async function exportShare(){

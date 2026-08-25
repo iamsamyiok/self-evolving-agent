@@ -177,6 +177,18 @@ export async function pingLLM({ baseUrl, apiKey, model } = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 规范化消息格式：支持多模态（图片 base64/url）→ OpenAI 兼容格式 */
+export function normalizeMessagesForLLM(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((m) => {
+    if (!m || typeof m.content === 'string') return m;
+    // 已经是数组格式（多模态）
+    if (Array.isArray(m.content)) return m;
+    // 字符串 → 保留
+    return { ...m, content: String(m.content) };
+  });
+}
+
 /** 原始 chat 调用（带重试/超时/熔断/标签计量）。MOCK 模式走 mockChat。 */
 export async function chat({ messages, temperature = 0.2, json = false, maxTokens = 2048, label = null, stream = false, onDelta = null }) {
   if (CONFIG.MOCK) {
@@ -204,7 +216,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       const res = await fetch(`${eff.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${eff.apiKey}` },
-        body: JSON.stringify({ model: eff.model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}), ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }),
+        body: JSON.stringify({ model: eff.model, messages: normalizeMessagesForLLM(messages), temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}), ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }),
         signal: ac.signal,
       });
       clearTimeout(timer); clearInterval(abortWatch);
@@ -280,7 +292,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
  */
 export async function chatJson({ messages, validate, temperature = 0.2, label = 'json' }) {
   const attempt = async (extraMsg) => {
-    const r = await chat({ messages: extraMsg ? [...messages, extraMsg] : messages, temperature, json: true, label });
+    const r = await chat({ messages: extraMsg ? [...messages, extraMsg] : normalizeMessagesForLLM(messages), temperature, json: true, label });
     const parsed = extractJSON(r.text);
     const shape = validateShape(parsed, validate);
     return shape.ok ? shape.value : { __error: shape.error };
@@ -301,10 +313,10 @@ export async function judge({ system, question, options, label = 'judge', sample
   if (CONFIG.MOCK) return mockJudge(question, options);
   const ask = async () => {
     const r = await chat({
-      messages: [
+      messages: normalizeMessagesForLLM([
         { role: 'system', content: system },
         { role: 'user', content: `${question}\n只输出一个词，取值：${options.join(' | ')}` },
-      ],
+      ]),
       temperature: 0, json: false, maxTokens: 16, label,
     });
     const text = (r.text ?? '').trim();

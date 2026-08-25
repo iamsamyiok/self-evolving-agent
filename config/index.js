@@ -99,7 +99,7 @@ export const CONFIG = {
   TOOLS_ENABLED: (env.SPA_TOOLS ?? local.TOOLS_ENABLED ?? '1') === '1',
   TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? join(ROOT, 'data', 'workspace'),
   TOOL_TIMEOUT_MS: 15_000,
-  TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? '0') === '1', // 默认禁用命令行工具
+  TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? local.TOOL_SHELL_ENABLED ?? '1') === '1', // 默认启用命令行工具
   TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn', 'api.anysearch.com', 'news.google.com']),
   // 开放网络模式（默认开）：http_get 不再受白名单限制，可访问任意公网站点（仍拦私网 SSRF 与凭据外传）
   TOOL_NET_OPEN: (env.SPA_TOOL_NET_OPEN ?? local.TOOL_NET_OPEN ?? '1') === '1',

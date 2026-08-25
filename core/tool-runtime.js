@@ -1,6 +1,6 @@
 // core/tool-runtime.js —— 真实工具调用体系（§9.2）+ 沙箱（§8.2）
 // 纪律：声明式工具清单（名称/参数/权限级别）；高危工具默认拒绝需理由；文件限定沙箱根；网络域名白名单。
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync, existsSync, appendFileSync } from 'node:fs';
 import { isAbsolute, resolve, join, relative, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
@@ -124,6 +124,7 @@ export class ToolRuntime {
     search_news: 'news_search', google_search: 'news_search', news_query: 'news_search',
     read_file: 'fs_read', read: 'fs_read', file_read: 'fs_read', cat: 'fs_read',
     write_file: 'fs_write', write: 'fs_write', file_write: 'fs_write', save_file: 'fs_write',
+    edit_file: 'edit_file', edit: 'edit_file',
     list: 'fs_list', list_files: 'fs_list', list_dir: 'fs_list', dir: 'fs_list',
     get: 'http_get', fetch: 'http_get', curl: 'http_get', http: 'http_get', get_url: 'http_get',
     weather: 'skill:get_weather',
@@ -139,6 +140,8 @@ export class ToolRuntime {
         return { ...p, path: p.path ?? p.file ?? p.filename ?? p.name };
       case 'fs_write':
         return { ...p, path: p.path ?? p.file ?? p.filename, content: p.content ?? p.text ?? p.data };
+      case 'edit_file':
+        return { ...p, path: p.path ?? p.file ?? p.filename, old_string: p.old_string ?? p.old ?? p.find ?? p.search, new_string: p.new_string ?? p.new ?? p.replace ?? p.with };
       case 'fs_list':
         return { ...p, dir: p.dir ?? p.path ?? p.directory ?? '.' };
       case 'http_get':
@@ -230,6 +233,56 @@ export class ToolRuntime {
         mkdirSync(dirname(c.abs), { recursive: true });
         writeFileSync(c.abs, p.content, 'utf8');
         return `已写入 ${p.path}（${p.content.length} 字符）`;
+      },
+    });
+    // ── 高危：编辑（字符串替换，需 use_reason）──
+    this.register({
+      name: 'edit_file', desc: '编辑沙箱工作区内文件（通过字符串替换；参数：path, old_string, new_string, 可选 occurrences=1）', risk: 'high',
+      checkPermissions: (p) => {
+        const c = confine(p.path, this.workspace);
+        if (!c.ok) return c;
+        if (!p.old_string) return { ok: false, reason: 'old_string 必填' };
+        if (p.new_string == null) return { ok: false, reason: 'new_string 必填' };
+        if (!p.use_reason || String(p.use_reason).trim().length < 4) {
+          return { ok: false, reason: '高危工具须携带使用理由（use_reason）' };
+        }
+        return { ok: true };
+      },
+      run: async (p) => {
+        const c = confine(p.path, this.workspace);
+        if (!c.ok) throw new Error(c.reason);
+        if (!existsSync(c.abs)) throw new Error(`文件不存在：${p.path}`);
+        const content = readFileSync(c.abs, 'utf8');
+        const oldStr = String(p.old_string);
+        const newStr = String(p.new_string);
+        const occurrences = typeof p.occurrences === 'number' ? p.occurrences : 1;
+        if (!content.includes(oldStr)) {
+          throw new Error(`old_string 未在文件中找到：${oldStr.slice(0, 100)}`);
+        }
+        if (KEY_PATTERN.test(newStr)) throw new Error('R4: 禁止在文件中写入凭据');
+        let result, count = 0;
+        if (occurrences === -1 || occurrences === Infinity) {
+          result = content.split(oldStr).join(newStr);
+          count = (content.split(oldStr).length - 1);
+        } else {
+          // 只替换前 occurrences 次（remaining 滚动切片，不可重赋 const content）
+          let remaining = content;
+          let pos = 0;
+          let replaced = 0;
+          const parts = [];
+          while (replaced < occurrences && (pos = remaining.indexOf(oldStr, pos)) !== -1) {
+            parts.push(remaining.slice(0, pos));
+            parts.push(newStr);
+            remaining = remaining.slice(pos + oldStr.length);
+            pos = 0;
+            replaced++;
+          }
+          parts.push(remaining);
+          result = parts.join('');
+          count = replaced;
+        }
+        writeFileSync(c.abs, result, 'utf8');
+        return `已编辑 ${p.path}（替换 ${count} 处）`;
       },
     });
     // ── 高危：网络（域名白名单，R5）──
