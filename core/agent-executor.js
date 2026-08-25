@@ -94,12 +94,17 @@ export class AgentExecutor {
    * 反污染：描述运行时环境状态的过时经验（"工具未注册/不可用"类）不入上下文——环境已变，此类结论只会误导规划器。 */
   static STALE_ENV_PATTERN = /未注册|未找到.{0,6}工具|工具.{0,8}(不可用|未注册|不存在)|无可用工具|缺少必要工具|白名单|越权|安全策略(禁止|拦截|不允许)/;
 
-  assembleContext(taskInput, skillOverride = null, convId = null) {
+  async assembleContext(taskInput, skillOverride = null, convId = null) {
     const w = this.retrievalWeights();
     const used = { skills: [], memories: [], experiences: [] };
+    const [skillHits, memoryHits, expHits] = await Promise.all([
+      skillOverride ? Promise.resolve(null) : this.skills.retrieve(taskInput, undefined, w).catch(() => []),
+      this.memory.retrieve(taskInput, undefined, w).catch(() => []),
+      this.experience.retrieve(taskInput, undefined, w).catch(() => []),
+    ]); // 三路并行检索（各内嵌一次查询 embed，缓存后同文本零成本）
     const skills = skillOverride
       ? [{ id: skillOverride.id, text: `技能「${skillOverride.name}」：${skillOverride.description} 步骤：${skillOverride.steps}`, weight: 1 }]
-      : this.skills.retrieve(taskInput, undefined, w).map((r) => {
+      : (skillHits ?? []).map((r) => {
           used.skills.push({ id: r.row.id, name: r.row.name, q: Number(r.row.quality_score.toFixed(2)) });
           return { id: r.row.id, text: `技能「${r.row.name}」：${r.row.description}`, weight: r.score };
         });
@@ -108,13 +113,13 @@ export class AgentExecutor {
       if (!convId || !row.entities) return 1;
       try { return JSON.parse(row.entities)?.conversation_id === convId ? 2 : 1; } catch { return 1; }
     };
-    const memories = this.memory.retrieve(taskInput, undefined, w).map((r) => ({ ...r, score: r.score * convBoost(r.row) }))
+    const memories = memoryHits.map((r) => ({ ...r, score: r.score * convBoost(r.row) }))
       .sort((a, b) => b.score - a.score)
       .map((r) => {
         used.memories.push({ id: r.row.id, excerpt: r.row.content.slice(0, 40), q: Number(r.row.quality_score.toFixed(2)) });
         return { id: r.row.id, text: r.row.content, weight: r.score };
       });
-    const experiences = this.experience.retrieve(taskInput, undefined, w)
+    const experiences = expHits
       .filter((r) => {
         const stale = AgentExecutor.STALE_ENV_PATTERN.test(`${r.row.summary ?? ''}${r.row.rules ?? ''}`);
         if (!stale) used.experiences.push({ id: r.row.id, summary: r.row.summary.slice(0, 40), q: Number(r.row.quality_score.toFixed(2)) });
@@ -158,7 +163,7 @@ export class AgentExecutor {
     const id = opts.taskId ?? uuid7(); // 外部预分配 ID：断线重连时前端可凭此查询结果
     const label = opts.label ?? `task:${id}`;
     const budgetWarn = budgetExhausted();
-    let { text: context, used } = this.assembleContext(input, opts.skillOverride ?? null, opts.conversationId ?? null);
+    let { text: context, used } = await this.assembleContext(input, opts.skillOverride ?? null, opts.conversationId ?? null);
     let lastWaitEvt = 0;
     const progress = (evt) => {
       // 排队/限流等待事件节流：5s 窗口内只透传一条，避免事件风暴刷屏时间线与轮询重放膨胀
@@ -370,7 +375,7 @@ export class AgentExecutor {
             degraded || starved || trivial ? null : this.skills.distillFromTrace(trace).then((r) => r?.status === 'draft' && this.skills.verifyDraft(r.id)),
             this.goldenColdStart(trace),
           ]);
-          if (context && outcome && error !== '已停止') this.chargeSkills(input, outcome === 'SUCCESS'); // 中止任务不惩罚技能
+          if (context && outcome && error !== '已停止') await this.chargeSkills(input, outcome === 'SUCCESS'); // 中止任务不惩罚技能
         } catch (e) {
           // store_closed = 正常停机竞态，静默；其余错误留痕供诊断
           if (String(e?.message) !== 'store_closed') {
@@ -624,8 +629,8 @@ export class AgentExecutor {
       .run(uuid7(), trace.input, JSON.stringify({ type: 'judge', value: null }), 'cold-start', Date.now());
   }
 
-  chargeSkills(input, ok) {
-    for (const r of this.skills.retrieve(input, 3, this.retrievalWeights())) {
+  async chargeSkills(input, ok) {
+    for (const r of await this.skills.retrieve(input, 3, this.retrievalWeights()).catch(() => [])) {
       this.skills.recordExecution(r.row.id, ok);
     }
   }

@@ -41,7 +41,8 @@ export const CONFIG = {
   EMBEDDING_PROVIDER: env.SPA_EMBED_PROVIDER ?? local.EMBEDDING_PROVIDER ?? 'none',
   EMBEDDING_BASE_URL: env.SPA_EMBED_BASE_URL ?? local.EMBEDDING_BASE_URL ?? '',
   EMBEDDING_MODEL: env.SPA_EMBED_MODEL ?? local.EMBEDDING_MODEL ?? '',
-  EMBEDDING_DIM: 0, // >0 时启用维度守护（切换需全量重算+快照）
+  EMBEDDING_API_KEY: env.SPA_EMBED_KEY ?? local.EMBEDDING_API_KEY ?? '', // 缺省回落主 LLM key（同源 provider 场景）
+  EMBEDDING_DIM: env.SPA_EMBED_DIM ?? local.EMBEDDING_DIM ?? 0, // >0 时启用维度守护（切换需全量重算+快照）
 
   // ── 运行模式 ──
   MOCK: (env.SPA_MOCK ?? local.MOCK ?? '0') === '1',

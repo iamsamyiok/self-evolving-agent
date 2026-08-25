@@ -30,7 +30,7 @@ node app.js --watchdog
 # 6. 多 Agent 集群（N 个独立 worker，能力路由 + 共享池提案门禁 + 全局墓碑）
 node app.js --cluster 3
 
-# 7. 测试（52 项：含沙箱逃逸/预算熔断/技能净化/复审翻案/对抗冻结/面板对账/集群冒烟）
+# 7. 测试（69 项：含沙箱逃逸/预算熔断/技能净化/复审翻案/对抗冻结/面板对账/集群冒烟/语义检索性能）
 npm test
 ```
 
@@ -98,7 +98,7 @@ snapshot          手动快照          usage           三层预算用量
 demo              MOCK 演示
 ```
 
-## 测试覆盖（52 项）
+## 测试覆盖（69 项）
 
 - **单元**：Wilson/BM25/解析器/Token预算/状态机/乐观锁/快照/互斥
 - **进化**：任务全链路、记忆/经验沉淀证据链、去重合并、DRAFT 门禁、墓碑拦截
@@ -107,6 +107,9 @@ demo              MOCK 演示
 - **技能净化**：僵尸隔离、FROZEN 观察期、冗余合并吸收、复审翻案（翻案率度量）、对抗冻结
 - **预算/调参/策略**：标签计量、L2 周期预算降级、调参界内留痕回退、Prompt 迭代黄金门禁、启动自检
 - **服务/集群**：面板指标与 purge_logs 对账 100%、HTTP 任务接口、2-worker 集群路由与结果回收
+- **安全加固**：间接注入防御（23 指纹三档分级，含代码/工具调用/JSON 结构注入）、技能版本快照+自动回滚+回滚后验证闭环、任务中断恢复、DNS TOCTOU 消除
+- **稳定性增强**：LLM 流式连接泄漏修复（abort 时显式关闭 reader）、run_js CPU 死循环防护（`__count__` 步进计数器 + `setTimeout` 封顶）、对话 context 滑窗（保留最近 3 轮完整 + 更早摘要）、hybridSearch 双阈值（bm25>0.3 && cos>0.15）、instant 记忆优先召回、embedding 覆盖率统计、启动时 backfillAll await、graceful shutdown（SIGTERM/SIGINT handler）
+- **语义检索**：BAAI/bge-m3 向量库 + BM25 混合检索、增量同步、写时补向量、存量异步回填
 
 ## 配置（config/index.js，含 [下界,上界] 安全边界）
 

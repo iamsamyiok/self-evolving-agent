@@ -3,6 +3,7 @@
 //       判定器（双采样一致才采信，否则弃权）、token 用量计量（成本护栏·轻量版）
 import { CONFIG } from '../config/index.js';
 import { extractJSON, validateShape } from '../utils/parser.js';
+import { normalizeVec } from '../utils/similarity.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 // ── 任务上下文（等待状态上报：chat() 深处的 429/排队等待要能通知到任务进度回调）──
@@ -323,24 +324,49 @@ export async function judge({ system, question, options, label = 'judge', sample
 
 // ── Embedding（openai-compatible 端点；未配置时返回 null，检索自动回落 BM25，§4.1.3）──
 const embedCache = new Map();
-export async function embed(text) {
-  if (CONFIG.MOCK || CONFIG.EMBEDDING_PROVIDER !== 'openai-compatible' || !CONFIG.EMBEDDING_BASE_URL) return null;
-  const key = text.slice(0, 500);
-  if (embedCache.has(key)) return embedCache.get(key);
+const EMBED_KEY = () => (CONFIG.EMBEDDING_API_KEY || CONFIG.LLM_API_KEY);
+
+/** 批量 embed（openai-compatible /embeddings 数组入参；单条失败不拖垮整批，返回与输入等长数组含 null） */
+export async function embedBatch(texts) {
+  const out = new Array(texts.length).fill(null);
+  if (CONFIG.MOCK || CONFIG.EMBEDDING_PROVIDER !== 'openai-compatible' || !CONFIG.EMBEDDING_BASE_URL) return out;
+  const pending = [];
+  const idxOf = new Map();
+  texts.forEach((t, i) => {
+    const key = String(t ?? '').slice(0, 500);
+    if (!key) return;
+    if (embedCache.has(key)) { out[i] = embedCache.get(key); return; }
+    const prev = idxOf.get(key);
+    if (prev == null) { idxOf.set(key, pending.length); pending.push(key); }
+  });
+  if (!pending.length) return out;
   const res = await fetch(`${CONFIG.EMBEDDING_BASE_URL}/embeddings`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CONFIG.LLM_API_KEY}` },
-    body: JSON.stringify({ model: CONFIG.EMBEDDING_MODEL, input: key }),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${EMBED_KEY()}` },
+    body: JSON.stringify({ model: CONFIG.EMBEDDING_MODEL, input: pending }),
   }).then((r) => r.json()).catch(() => null);
-  const vec = res?.data?.[0]?.embedding;
-  if (!Array.isArray(vec)) return null;
-  if (CONFIG.EMBEDDING_DIM > 0 && vec.length !== CONFIG.EMBEDDING_DIM) {
-    throw new Error(`Embedding 维度突变 ${vec.length} != ${CONFIG.EMBEDDING_DIM}（破坏性变更，须全量重算+快照）`);
+  const data = res?.data;
+  if (!Array.isArray(data) || data.length !== pending.length) return out;
+  for (let i = 0; i < pending.length; i++) {
+    const vec = data[i]?.embedding;
+    if (!Array.isArray(vec)) continue;
+    if (CONFIG.EMBEDDING_DIM > 0 && vec.length !== CONFIG.EMBEDDING_DIM) {
+      throw new Error(`Embedding 维度突变 ${vec.length} != ${CONFIG.EMBEDDING_DIM}（破坏性变更，须全量重算+快照）`);
+    }
+    const f32 = normalizeVec(vec);
+    embedCache.set(pending[i], f32);
+    texts.forEach((t, j) => { if (String(t ?? '').slice(0, 500) === pending[i]) out[j] = f32; });
   }
-  const f32 = Float32Array.from(vec);
-  embedCache.set(key, f32);
-  if (embedCache.size > 2000) embedCache.delete(embedCache.keys().next().value);
-  return f32;
+  return out;
+}
+
+export async function embed(text) {
+  const key = String(text ?? '').slice(0, 500);
+  if (!key) return null;
+  const cached = embedCache.get(key);
+  if (cached) return cached;
+  const [vec] = await embedBatch([key]);
+  return vec ?? null;
 }
 
 // ═══════════ MOCK 模式（SPA_MOCK=1）：确定性离线假后端，供测试/演示 ═══════════

@@ -169,3 +169,16 @@ Entries discovered by the Agent during task execution should follow this format:
 - Instructions:
   - 改动 core/safety-constitution.js 后启动会报 constitution_mismatch（运行时防篡改哈希）；合法迭代后须用 node 脚本重登记 `constitution_sha`（store.setState）
   - store 关闭后统一抛 `store_closed`（store-base.js 的 db getter 守卫）；上层捕获该错误应静默
+- Date: 2026-08-25
+- Context: Agent 触发 13 项系统性弱点修复（Great Wall 复杂任务用例暴露 LLM 连接泄漏 + run_js CPU 死循环等）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - hybridSearch 双阈值：`score > 0.15 && bm25 > 0.3`（任一 dim 低于下限丢弃），跨查询分数不可比时防低质命中污染上下文
+  - instant 记忆独立 bucket：检索时先查 instant tier（最多占 topK 30%），再查 semantic/short/long tier
+  - 经验平凡成功过滤：结构化检查（`rules.length === 0 && pitfalls.length === 0`）替代字符串启发式
+  - 技能提炼可执行性门控：validate 回调校验 tool:* 步骤的 tool 名在注册表内 + params 必填字段齐全
+  - 技能回滚后验证闭环：rollbackManually 返回 verified 字段，tryRollback 日志补 snapshot_sha + rollback_reason
+  - skill_versions 表新增 sha TEXT 列（migration V4+）；snapshotSkill 插入时需传 null 占位
+  - embed-backfill 启动改为 await backfillAll(store) + 2s 缓冲后再 loop.start()
+  - graceful shutdown：SIGTERM/SIGINT → 中止 liveTasks → 等 5s → store.close() → process.exit(0)
+  - 注入指纹从 17 增至 23（新增 code_inject/tool_inject/json_inject 三类）

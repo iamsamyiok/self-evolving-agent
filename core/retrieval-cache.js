@@ -7,7 +7,7 @@
 // 2. 增量同步：变化时按 id diff，只对新增/变更/删除的条目重分词（配合 store.touch/bumpStats 记账旁路，
 //    检索命中的 access_count 记账不会触发任何重建）
 // 3. 冷热裁剪：超过 maxRows 时按温度（质量 + 重要性 + 时近性）保留最热子集，检索量有上界（渐进式加载）
-import { BM25Index } from '../utils/similarity.js';
+import { BM25Index, vecFromB64, topKByCosine } from '../utils/similarity.js';
 import { TABLES } from './store-base.js';
 
 export class EntityIndex {
@@ -65,12 +65,15 @@ export class EntityIndex {
     if (key === this._key) return this;
     const rows = this._loadRows();
     const next = new Map(rows.map((r) => [r.id, r]));
-    for (const id of this._rows.keys()) if (!next.has(id)) this._idx.remove(id);
+    for (const id of this._rows.keys()) if (!next.has(id)) { this._idx.remove(id); this._vecs?.delete(id); }
+    this._vecs ??= new Map(); // id -> 单位向量（bge-m3 base64 解码；无向量行不入表）
     for (const [id, row] of next) {
       const old = this._rows.get(id);
       if (!old || old.version !== row.version || old.updated_at !== row.updated_at) {
         if (old) this._idx.remove(id);
         this._idx.add(id, this.textOf(row));
+        const v = vecFromB64(row.embedding);
+        if (v) this._vecs.set(id, v); else this._vecs.delete(id);
       }
     }
     this._rows = next;
@@ -84,11 +87,41 @@ export class EntityIndex {
 
   get index() { this.refresh(); return this._idx; }
 
+  get vecs() { this.refresh(); return this._vecs; }
+
   search(query, topK) { this.refresh(); return this._idx.search(query, topK); }
+
+  /** 混合检索：BM25（词面精确）+ 向量余弦（语义泛化）双路召回 → 归一化融合。
+   *  queryVec 为 null（未配置/失败）时退化为纯 BM25，行为与旧版一致。
+   *  融合：text = 0.45*bm25_norm + 0.55*cos（任一路召回即可候选，另一路缺失记 0） */
+  hybridSearch(query, topK, queryVec) {
+    this.refresh();
+    const bm = this._idx.search(query, topK * 2);
+    const maxBm = bm.length ? bm[0].score : 0;
+    const cosHits = queryVec && this._vecs.size ? topKByCosine(queryVec, [...this._vecs.entries()].map(([id, vec]) => ({ id, vec })), topK * 2) : [];
+    const merged = new Map();
+    for (const h of bm) merged.set(h.id, { id: h.id, bm25: maxBm > 0 ? h.score / maxBm : 0, cos: 0 });
+    for (const h of cosHits) {
+      const prev = merged.get(h.id) ?? { id: h.id, bm25: 0, cos: 0 };
+      prev.cos = Math.max(0, h.score);
+      merged.set(h.id, prev);
+    }
+    const hasVec = cosHits.length > 0;
+    const out = [...merged.values()]
+      .filter((m) => hasVec && queryVec ? (m.bm25 > 0.3 && m.cos > 0) : m.bm25 > 0.3) // 双阈值防跨查询评分不可比：bm25 单独必须 > 0.3，混合时 cos 也必须 > 0
+      .map((m) => ({
+        id: m.id,
+        score: hasVec && queryVec ? 0.45 * m.bm25 + 0.55 * m.cos : m.bm25,
+        bm25: m.bm25,
+        cos: m.cos,
+      }));
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, topK);
+  }
 
   /** 缓存状态（测试/诊断用）：条目数、重建次数、最近构建时间 */
   stats() {
     this.refresh();
-    return { rows: this._rows.size, rebuilds: this.rebuilds, builtAt: this._builtAt };
+    return { rows: this._rows.size, vecs: this._vecs?.size ?? 0, rebuilds: this.rebuilds, builtAt: this._builtAt };
   }
 }

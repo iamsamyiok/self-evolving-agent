@@ -171,3 +171,50 @@ export function jaccard(tokensA, tokensB) {
   for (const t of A) if (B.has(t)) inter++;
   return inter / (A.size + B.size - inter);
 }
+
+// ═════════ 向量语义检索工具（bge-m3 等开放接口；存 base64 单位向量，点积即余弦） ═════════
+
+/** Float32Array → base64（SQLite embedding 列存储格式） */
+export function vecToB64(vec) {
+  return Buffer.from(new Float32Array(vec).buffer).toString('base64');
+}
+
+/** base64 → Float32Array（损坏/空值返回 null） */
+export function vecFromB64(b64) {
+  if (typeof b64 !== 'string' || !b64) return null;
+  try {
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length % 4) return null;
+    return new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4);
+  } catch { return null; }
+}
+
+/** 归一化为单位向量（零向量原样返回，点积安全为 0） */
+export function normalizeVec(vec) {
+  const v = new Float32Array(vec);
+  let norm = 0;
+  for (let i = 0; i < v.length; i++) norm += v[i] * v[i];
+  norm = Math.sqrt(norm);
+  if (norm < 1e-12) return v;
+  for (let i = 0; i < v.length; i++) v[i] /= norm;
+  return v;
+}
+
+/** 余弦相似度（输入应为单位向量，点积即余弦；任意输入也安全） */
+export function cosine(a, b) {
+  if (!a || !b || a.length !== b.length || !a.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+/** 向量集合 top-K 扫描（向量数 ≤ 数千时线性扫描足够，无需 ANN 索引） */
+export function topKByCosine(queryVec, vecEntries, topK) {
+  const scored = [];
+  for (const { id, vec } of vecEntries) {
+    const s = cosine(queryVec, vec);
+    if (s > 0.05) scored.push({ id, score: s });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK);
+}

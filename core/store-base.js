@@ -145,7 +145,8 @@ export class Store {
         name TEXT, scenario TEXT, description TEXT, steps TEXT,
         quality_score REAL, success_count INTEGER, fail_count INTEGER,
         snapshot_at INTEGER NOT NULL,
-        reason TEXT
+        reason TEXT,
+        sha TEXT
       )`);
     }
     const tcols = this.db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
@@ -358,6 +359,14 @@ export class Store {
       s[type].total = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
     }
     s.purge_logs = this.db.prepare("SELECT COUNT(*) AS n FROM purge_logs WHERE status != 'ROLLED_BACK'").get().n;
+    // embedding 覆盖率：各实体类型有语义向量的比例
+    const embedCoverage = {};
+    for (const [type, table] of Object.entries(TABLES)) {
+      const total = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+      const withEmbed = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE embedding IS NOT NULL`).get().n;
+      if (total > 0) embedCoverage[type] = { withEmbed, total, ratio: Number((withEmbed / total).toFixed(3)) };
+    }
+    s.embedding_coverage = embedCoverage;
     s.tasks = this.db.prepare("SELECT outcome, COUNT(*) AS n FROM tasks WHERE status != 'running' GROUP BY outcome").all()
       .reduce((acc, r) => { acc[r.outcome] = r.n; return acc; }, {});
     s.golden = this.db.prepare('SELECT COUNT(*) AS n FROM golden_tasks WHERE enabled = 1').get().n;

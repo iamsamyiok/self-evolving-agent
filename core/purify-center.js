@@ -6,6 +6,7 @@ import { Store, runExclusive, uuid7 } from './store-base.js';
 import { candidatePairs, jaccard, tokenize } from '../utils/similarity.js';
 import { wilsonLowerBound, memoryImportance, netRate, qualityScore } from '../utils/stats.js';
 import { budgetExhausted, labelBudgetLeft, chatJson, judge } from './llm-adapter.js';
+import { backfillOne } from './embed-backfill.js';
 
 export class PurifyCenter {
   constructor(store = new Store(), executor = null) {
@@ -344,6 +345,7 @@ export class PurifyCenter {
       steps: JSON.stringify(out.steps.slice(0, 8)),
       params_schema: skill.params_schema, success_count: 0, fail_count: 0, verified: 0, heat: 'warm',
     });
+    backfillOne(store, 'skill', id); // 异步补语义向量
     store.logPurge({
       epoch, entityType: 'skill', entityId: id, action: 'REPAIR', dimension: 'skill',
       reason: `修复 ${skill.id}（失败可复现）`, evidence: { parent: skill.id, reproduced: true },

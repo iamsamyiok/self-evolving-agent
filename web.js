@@ -462,6 +462,10 @@ export async function startWeb({ port = Number(process.env.SPA_WEB_PORT ?? 3789)
   control.startupCheck();
   const nInterrupted = store.markInterruptedTasks?.() ?? 0; // 上次运行的中断任务如实标记（重启恢复）
   if (nInterrupted) console.log(`[web] 恢复完成：${nInterrupted} 个在途任务标记为已中断`);
+  // 启动时阻塞式补存量语义向量（await 完成后再开 loop，确保首轮检索即可命中向量）
+  const { backfillAll } = await import('./core/embed-backfill.js');
+  try { await backfillAll(store); } catch { /* 静默 */ }
+  await new Promise((r) => setTimeout(r, 2000)); // 2s 缓冲：让首轮嵌入完成后再开轮询循环
   loop.start(); // 后台双循环：聊天期间持续净化（轻量 10min±抖动 / 深度每日+启动30s内一轮）
 
   const web = new WebServer({ store, executor, loop, control });
@@ -476,6 +480,22 @@ export async function startWeb({ port = Number(process.env.SPA_WEB_PORT ?? 3789)
     await dash.listen(CONFIG.DASHBOARD_PORT, (input) => loop.submitTask(input));
     console.log(`[web] 观测面板  http://127.0.0.1:${CONFIG.DASHBOARD_PORT}`);
   } catch (e) { console.warn('[web] 面板启动失败（不影响对话）:', e.message); }
+
+  // graceful shutdown：SIGTERM/SIGINT 时中止所有在途任务并清干净连接
+  const shutdown = async (signal) => {
+    console.log(`[web] ${signal} received，graceful shutdown...`);
+    // 1. 中止所有 live 任务（触发 abortController.abort + LLM 适配器中的 finally finishStreaming）
+    for (const [taskId, live] of WebServer.liveTasks) {
+      live.abort = true;
+    }
+    // 2. 等待 in-flight LLM 请求结束（最多 5s）
+    await new Promise((r) => setTimeout(r, 5000));
+    // 3. 关闭 store
+    try { store.close(); } catch { /* 已关闭则忽略 */ }
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
   return { web, store, executor, purify, loop, control };
 }

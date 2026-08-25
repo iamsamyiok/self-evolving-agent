@@ -5,6 +5,7 @@
 // 3. 增量同步：新增/更新/删除只重分词变更条目
 // 4. 大记忆池下检索耗时有上界（性能不随 N 线性劣化）
 import { test, before, after } from 'node:test';
+process.env.SPA_MOCK = '1'; // 禁用真实 embed/LLM 调用，确保测试离线可重复
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
@@ -69,7 +70,7 @@ test('记忆池 5000 条：缓存命中 + 增量同步 + 耗时上界', async ()
 
   // 首次检索：构建缓存
   const t1 = Date.now();
-  const r1 = mem.retrieve('量子计算 通用方法', 8);
+  const r1 = await mem.retrieve('量子计算 通用方法', 8);
   const firstMs = Date.now() - t1;
   assert.ok(r1.length >= 1, '应检索到量子计算相关记忆');
   assert.ok(r1.every((r) => r.row.content.includes('量子计算')));
@@ -77,7 +78,7 @@ test('记忆池 5000 条：缓存命中 + 增量同步 + 耗时上界', async ()
 
   // 热路径：连续 20 次检索全部命中缓存（不重建）
   const t2 = Date.now();
-  for (let i = 0; i < 20; i++) mem.retrieve(topics[i % topics.length] + ' 工具组合', 8);
+  for (let i = 0; i < 20; i++) await mem.retrieve(topics[i % topics.length] + ' 工具组合', 8);
   const warm20Ms = Date.now() - t2;
   const stats2 = mem.idx.stats();
   assert.equal(stats2.rebuilds, stats1.rebuilds, '命中记账（touch 旁路）不应触发重建');
@@ -85,7 +86,7 @@ test('记忆池 5000 条：缓存命中 + 增量同步 + 耗时上界', async ()
   // 增量同步：新增 1 条 → 只同步增量、新条目可检索
   await mem.create({ content: '独特标记词xyzzy：量子纠错用表面码', tier: 'short', skipLLM: true });
   const t3 = Date.now();
-  const r3 = mem.retrieve('独特标记词xyzzy', 3);
+  const r3 = await mem.retrieve('独特标记词xyzzy', 3);
   const incMs = Date.now() - t3;
   assert.ok(r3.length >= 1 && r3[0].row.content.includes('xyzzy'), '新增记忆应立即可检索');
   assert.ok(incMs < 200, `增量同步应远快于全量重建（${incMs}ms）`);
@@ -93,7 +94,7 @@ test('记忆池 5000 条：缓存命中 + 增量同步 + 耗时上界', async ()
   // 真实更新（store.update 递增 version）应触发同步
   const target = store.get('memory', 'm0');
   store.update('memory', 'm0', { content: 'm0已改写为独特词plugh测试' });
-  const r4 = mem.retrieve('plugh', 3);
+  const r4 = await mem.retrieve('plugh', 3);
   assert.ok(r4.length >= 1, 'update 后的新内容应可检索');
 
   console.log(`[perf] insert5000=${insertMs}ms firstSearch=${firstMs}ms warm20=${warm20Ms}ms incremental=${incMs}ms rebuilds=${mem.idx.stats().rebuilds}`);
@@ -102,15 +103,15 @@ test('记忆池 5000 条：缓存命中 + 增量同步 + 耗时上界', async ()
   assert.ok(warm20Ms < 1500, `20 次热检索应在 1500ms 内（实际 ${warm20Ms}ms）`);
 });
 
-test('技能检索同样走缓存且记账不重建', () => {
+test('技能检索同样走缓存且记账不重建', async () => {
   const skills = new SkillSystem(store);
   store.db.prepare(`INSERT INTO skills (id, name, state, version, parent_id, origin, created_at, updated_at, immunity_until, execution_count, quality_score, embedding, quarantined_at, purge_after, last_used_at, scenario, description, steps, params_schema, success_count, fail_count, verified, heat)
     VALUES (?, 'perf_test_skill', 'ACTIVE', 1, NULL, 'evolve', ?, ?, ?, 0, 0.6, NULL, NULL, NULL, ?, '性能测试场景', '性能测试技能描述量子计算', '[]', NULL, 0, 0, 0, 'warm')`)
     .run('s-perf-1', Date.now(), Date.now(), Date.now(), Date.now());
-  const r1 = skills.retrieve('量子计算 技能', 5);
+  const r1 = await skills.retrieve('量子计算 技能', 5);
   assert.ok(r1.length >= 1 && r1[0].row.name === 'perf_test_skill');
   const b1 = skills.idx.stats().rebuilds;
-  skills.retrieve('量子计算 技能', 5); // 再检索一次
+  await skills.retrieve('量子计算 技能', 5); // 再检索一次
   assert.equal(skills.idx.stats().rebuilds, b1, '检索不应触发重建');
 });
 

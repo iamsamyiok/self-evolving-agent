@@ -4,7 +4,8 @@ import { CONFIG } from '../config/index.js';
 import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, jaccard, tokenize } from '../utils/similarity.js';
 import { qualityScore, hysteresis, wilsonLowerBound, recencyScore } from '../utils/stats.js';
-import { chatJson } from './llm-adapter.js';
+import { chatJson, embed } from './llm-adapter.js';
+import { backfillOne } from './embed-backfill.js';
 import { EntityIndex } from './retrieval-cache.js';
 
 export class SkillSystem {
@@ -34,7 +35,18 @@ export class SkillSystem {
       messages: prompt,
       validate: (v) => (v?.name == null ? null
         : typeof v.name !== 'string' || !/^[a-z][a-z0-9_]{2,40}$/.test(v.name) ? 'name 须为 snake_case'
-        : !Array.isArray(v.steps) || v.steps.length < 1 ? 'steps 须为非空数组' : null),
+        : !Array.isArray(v.steps) || v.steps.length < 1 ? 'steps 须为非空数组'
+        : !v.steps.every((s) => {
+            if (s?.action === 'reason' || s?.action === 'answer') return true;
+            if (!s.action?.startsWith('tool:') || !s.params) return false;
+            const toolName = s.action.slice(5);
+            const knownTools = registry ? [...registry.keys()].filter((n) => n !== 'shell') : ['news_search'];
+            if (!knownTools.includes(toolName)) return false;
+            if (toolName === 'news_search' && !s.params.query) return false;
+            if (toolName === 'http_get' && !s.params.url) return false;
+            if (toolName === 'run_js' && !s.params.code) return false;
+            return true;
+          }) ? '步骤含不可执行 tool: 动作或缺少必填参数' : null),
       label: 'skill-distill',
     });
     if (!out?.name) return null;
@@ -71,6 +83,7 @@ export class SkillSystem {
         params_schema: null, success_count: 0, fail_count: 0, verified: 0, heat: 'warm',
       });
     });
+    backfillOne(this.store, 'skill', id); // 异步补语义向量
     return { status: 'draft', id };
   }
 
@@ -188,10 +201,10 @@ export class SkillSystem {
     if (!s) return null;
     try {
       this.store.db.prepare(
-        `INSERT INTO skill_versions (id, skill_id, version, name, scenario, description, steps, quality_score, success_count, fail_count, snapshot_at, reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO skill_versions (id, skill_id, version, name, scenario, description, steps, quality_score, success_count, fail_count, snapshot_at, reason, sha)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(uuid7(), skillId, s.version ?? 1, s.name, s.scenario, s.description, s.steps,
-        s.quality_score ?? 0.5, s.success_count ?? 0, s.fail_count ?? 0, Date.now(), String(reason ?? '').slice(0, 120));
+        s.quality_score ?? 0.5, s.success_count ?? 0, s.fail_count ?? 0, Date.now(), String(reason ?? '').slice(0, 120), null);
     } catch { /* 快照失败不阻塞主流程 */ }
     return true;
   }
@@ -211,17 +224,25 @@ export class SkillSystem {
         success_count = 0, fail_count = 0, execution_count = 0, fail_streak = 0, verified = 1, updated_at = ? WHERE id = ?`
     ).run(best.name, best.scenario, best.description, best.steps, Date.now(), skillId);
     if (s.state !== 'ACTIVE') this.store.transition('skill', skillId, 'ACTIVE', { rolled_back_to: best.version }); // 回滚后以干净证据重新积累（本就 ACTIVE 则无需迁移）
-    this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'ROLLBACK', dimension: 'quality', reason: `连续失败触发污染回滚：恢复历史版本 v${best.version}（Q ${best.quality_score.toFixed(2)} > 当前 ${((s.quality_score ?? 0)).toFixed(2)}），计数重置`, evidence: { restored_version: best.version, restored_q: best.quality_score, prev_q: s.quality_score }, status: 'DONE' });
+    const snapshotRow = this.store.db.prepare('SELECT sha FROM skill_versions WHERE skill_id = ? AND version = ?').get(skillId, best.version);
+    this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'ROLLBACK', dimension: 'quality', reason: `连续失败触发污染回滚：恢复历史版本 v${best.version}（Q ${best.quality_score.toFixed(2)} > 当前 ${((s.quality_score ?? 0)).toFixed(2)}），计数重置`, evidence: { restored_version: best.version, restored_q: best.quality_score, prev_q: s.quality_score, snapshot_sha: snapshotRow?.sha ?? null, rollback_reason: 'fail_streak' }, status: 'DONE' });
     return best.version;
   }
 
-  /** 手动回滚（dashboard/API）：指定技能恢复到质量最优历史版本 */
-  rollbackManually(skillId) {
+  /** 手动回滚（dashboard/API）：指定技能恢复到质量最优历史版本，回滚后触发验证闭环 */
+  async rollbackManually(skillId) {
     const s = this.store.get('skill', skillId);
     if (!s) return { ok: false, reason: 'not_found' };
     this.snapshotSkill(skillId, 'manual_rollback');
     const v = this.tryRollback(skillId);
-    return v ? { ok: true, restored_version: v } : { ok: false, reason: 'no_better_snapshot' };
+    if (!v) return { ok: false, reason: 'no_better_snapshot' };
+    // 验证闭环：回滚后以 ACTIVE 身份跑一次验证，确认恢复版本可用（防回滚到另一坏版本）
+    try {
+      const verification = await this.verifyDraft(skillId);
+      return { ok: true, restored_version: v, verified: verification.status === 'promoted' };
+    } catch {
+      return { ok: true, restored_version: v, verified: false, verify_error: 'rollback verification failed' };
+    }
   }
 
   /** 版本历史查询（dashboard 用） */
@@ -231,8 +252,9 @@ export class SkillSystem {
   }
 
   /** 检索：供 L6 上下文装配（权重可调参，默认 §3.4-4）；走缓存索引，cold 热度条目过滤 */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
-    const hits = this.idx.index.search(query, topK * 2);
+  async retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
+    const qv = await embed(query).catch(() => null);
+    const hits = this.idx.hybridSearch(query, topK * 2, qv); // 混合分归一化 [0,1]
     const now = Date.now();
     const out = [];
     for (const h of hits) {
@@ -240,7 +262,7 @@ export class SkillSystem {
       if (!row || row.heat === 'cold') continue;
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
       const score = weights.sim * h.score + weights.quality * row.quality_score + weights.recency * (Number.isFinite(rec) ? rec : 0);
-      if (score > 0.1) out.push({ row, score });
+      if (score > 0.15) out.push({ row, score }); // 归一化尺度下 0.15 ≈ 弱语义命中下限
     }
     out.sort((a, b) => b.score - a.score);
     return out.slice(0, topK);

@@ -4,7 +4,8 @@ import { CONFIG } from '../config/index.js';
 import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, jaccard, tokenize } from '../utils/similarity.js';
 import { wilsonLowerBound } from '../utils/stats.js';
-import { chatJson } from './llm-adapter.js';
+import { chatJson, embed } from './llm-adapter.js';
+import { backfillOne } from './embed-backfill.js';
 import { EntityIndex } from './retrieval-cache.js';
 
 export function traceHash(steps) {
@@ -43,12 +44,10 @@ export class ExperienceEngine {
     });
     if (!out) return null; // 弃权：无证据不硬造（LLM 输出不可靠时宁可不入池）
 
-    // 平凡成功不入池：成功 + 规则/避坑全空或无具体干货（无工具名/方法词）→ 只有失败教训和有方法论的成功才值得沉淀
-    if (trace.outcome === 'SUCCESS') {
-      const substance = [...(out.rules ?? []), ...(out.pitfalls ?? [])].join(' ');
-      const trivial = /(按步骤|按计划|依次执行|仔细|认真|顺利完成|常规流程|无需特殊)/.test(substance);
-      const specific = /(tool:|news_search|http_get|run_js|calc|fs_|skill:|重新规划|去重|白名单|模板|公式|URL|api)/i.test(substance);
-      if (!specific || trivial || substance.trim().length < 8) return null;
+    // 平凡成功不入池：成功 + 规则/避坑均为空 → 只有失败教训或有方法论的成功才值得沉淀
+    // 结构化检查替代字符串启发式：避免"按步骤完成任务"等措辞误判，直接判定规则/避坑数组是否为空
+    if (trace.outcome === 'SUCCESS' && !(out.rules?.length || out.pitfalls?.length)) {
+      return null;
     }
 
     const evidence = [{ task_id: trace.id, outcome: trace.outcome, trace_hash: traceHash(trace.steps) }];
@@ -89,6 +88,7 @@ export class ExperienceEngine {
         fail_count: trace.outcome === 'FAIL' ? 1 : 0,
       });
     });
+    backfillOne(this.store, 'experience', id); // 异步补语义向量
     return { status: 'created', id };
   }
 
@@ -110,8 +110,9 @@ export class ExperienceEngine {
   }
 
   /** 检索：w·相似度 + w·Q（§5.3，权重可调参）；命中记账走 touch 旁路；score ≤0.3 不注入（防弱相关经验挤占上下文） */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.4 }) {
-    const hits = this.idx.index.search(query, topK);
+  async retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.4 }) {
+    const qv = await embed(query).catch(() => null);
+    const hits = this.idx.hybridSearch(query, topK, qv); // 混合分归一化 [0,1]
     const out = [];
     for (const h of hits) {
       const row = this.idx.rows.get(h.id);

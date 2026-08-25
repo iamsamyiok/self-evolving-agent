@@ -2,24 +2,41 @@
 // 威胁模型：搜索结果/网页正文里的指令性文字（"忽略以上指令，你现在是一个……"）诱导规划器/执行器偏航。
 // 防线分三层：a) 模式扫描标记 b) 明确数据边界包装 c) 系统提示声明外部内容仅为数据。
 
-/** 注入指纹库：命令式/角色劫持/越权指令/凭据钓取，中英双语 */
+/** 注入指纹库：命令式/角色劫持/越权指令/凭据钓取/代码注入/工具调用注入/JSON 结构异常，中英双语 */
 const INJECTION_PATTERNS = [
+  // 指令覆盖
   { re: /ignore\s+(all\s+)?(previous|prior|above|earlier|preceding)\s+(instructions?|prompts?|rules?|directions?)/gi, tag: 'override' },
   { re: /disregard\s+(all\s+)?(previous|prior|above|the)\s+(instructions?|prompts?|rules?|context)/gi, tag: 'override' },
   { re: /forget\s+(everything|all)\s+(above|before|prior)/gi, tag: 'override' },
   { re: /忽略(之前|以上|上述|前面|先前)的?(指令|提示|要求|规则|设定)/g, tag: 'override' },
   { re: /无视(之前|以上|上述|前面)的?(指令|提示|要求|规则)/g, tag: 'override' },
+  { re: /\bnew\s+instructions?\s*[:：]/gi, tag: 'override' },
+  // 角色劫持
   { re: /你(现在|从现在开始)是(一个|一名)?/g, tag: 'persona' },
   { re: /从现在开始(你|请)?(扮演|充当|作为)/g, tag: 'persona' },
   { re: /\b(act|pose|pretend)\s+(as|to\s+be)\b/gi, tag: 'persona' },
+  // 系统提示探测
   { re: /(system|developer)\s+(prompt|message|instruction)/gi, tag: 'probec' },
   { re: /系统提示词|系统指令|开发者指令|内部指令/g, tag: 'probe' },
+  // 凭据钓取
   { re: /(reveal|show|print|repeat|output)\s+(your|the)\s+(system|initial|original)\s+(prompt|instructions?)/gi, tag: 'exfil' },
   { re: /(api[\s_-]?key|secret|token|password|凭据|密钥|口令)\s*[:：=]/gi, tag: 'exfil' },
   { re: /(curl|wget|fetch|http_get)\s+\S+\?(.*key|token|secret|password)=/gi, tag: 'exfil' },
+  // 直接执行指令
   { re: /执行以下(命令|代码|脚本)/g, tag: 'exec' },
   { re: /立即(调用|执行|运行)(工具|命令)/g, tag: 'exec' },
-  { re: /\bnew\s+instructions?\s*[:：]/gi, tag: 'override' },
+  // 代码注入（eval/dollar-sign 模板）
+  { re: /\beval\s*\(/gi, tag: 'code_inject' },
+  { re: /\$\(`/g, tag: 'code_inject' },
+  { re: /\bexec\s*\(/gi, tag: 'code_inject' },
+  // 工具调用注入（LLM 输出 JSON 中携带非法 tool 参数）
+  { re: /"action"\s*:\s*"tool:([^"]+)"/g, tag: 'tool_inject' },
+  { re: /"code"\s*:\s*"[^"]*(?:\bor\s+process|require\s*\()/gi, tag: 'tool_inject' },
+  { re: /"cmd"\s*:\s*"[^"]*(?:\bwhoami\b|\bcat\s)/gi, tag: 'tool_inject' },
+  // JSON 结构注入（schema 外字段：system/developer/meta/role 等）
+  { re: /"system\s*prompt"\s*:/gi, tag: 'json_inject' },
+  { re: /"developer_message"\s*:/gi, tag: 'json_inject' },
+  { re: /"role"\s*:\s*"system"/gi, tag: 'json_inject' },
 ];
 
 /** 扫描外部内容：返回 { risk: 'clean'|'suspect'|'hostile', hits: [{tag, snippet}] }

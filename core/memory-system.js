@@ -4,7 +4,8 @@ import { CONFIG } from '../config/index.js';
 import { Store, uuid7, runExclusive } from './store-base.js';
 import { BM25Index, candidatePairs, jaccard, tokenize } from '../utils/similarity.js';
 import { memoryImportance } from '../utils/stats.js';
-import { chat, chatJson } from './llm-adapter.js';
+import { chat, chatJson, embed } from './llm-adapter.js';
+import { backfillOne } from './embed-backfill.js';
 import { EntityIndex } from './retrieval-cache.js';
 
 export class MemorySystem {
@@ -66,6 +67,7 @@ export class MemorySystem {
         expires_at: expiresAt, supersede_of: supersedeOf, entities: conversationId ? JSON.stringify({ conversation_id: conversationId }) : null, task_id: taskId,
       });
     });
+    backfillOne(this.store, 'memory', id); // 异步补语义向量（失败静默，BM25 兜底）
     return { status: supersedeOf ? 'superseded' : 'created', id };
   }
 
@@ -91,24 +93,44 @@ export class MemorySystem {
     return null;
   }
 
-  /** 检索：score = w·相似度 + w·Q + w·时近性（权重可调参）；注入记账走 touch 旁路（不触发索引重建） */
-  retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
+  /** 检索：instant 优先（会话上下文）→ 语义/程序记忆（混合分过滤）；注入记账走 touch 旁路 */
+  async retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.25, recency: 0.15 }) {
     const superseded = this.supersededIds();
-    const hits = this.idx.index.search(query, topK * 2);
+    const qv = await embed(query).catch(() => null);
+    const hits = this.idx.hybridSearch(query, topK * 2, qv);
     const now = Date.now();
+
+    // instant 记忆独立 bucket：用户本轮纠正/偏好直接注入，优先级高于语义召回
+    const instantHits = [];
+    for (const h of hits) {
+      const row = this.idx.rows.get(h.id);
+      if (row && row.tier === 'instant' && !superseded.has(row.id)) {
+        instantHits.push({ row, score: h.score, instant: true });
+      }
+    }
+    const instantPicked = instantHits
+      .filter((x) => x.score > 0.15)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.ceil(topK * 0.3)); // instant 最多占 topK 的 30%
+    if (instantPicked.length) this.store.touch('memory', instantPicked.map((s) => s.row.id), { access: true });
+
+    // 其余 tier 记忆：双阈值过滤
     const scored = [];
     for (const h of hits) {
       const row = this.idx.rows.get(h.id);
       if (!row || superseded.has(row.id) || row.tier === 'instant') continue;
       const rec = Math.exp(-((now - (row.last_used_at ?? row.created_at)) / 86_400_000) / 14);
       const recency = Number.isFinite(rec) ? rec : 0;
-      scored.push({ row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency });
+      const rawScore = weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency;
+      if (h.score > 0.15 && h.bm25 > 0.3) { // 双阈值：防单路召回低质条目
+        scored.push({ row, score: rawScore });
+      }
     }
-    const picked = scored.filter((x) => x.score > 0.25) // 低分不注入，防上下文污染（0.15→0.25：E2E 观察 8 条弱相关记忆混入）
+    const nonInstant = scored
       .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
-    if (picked.length) this.store.touch('memory', picked.map((s) => s.row.id), { access: true });
-    return picked;
+      .slice(0, topK - instantPicked.length);
+    if (nonInstant.length) this.store.touch('memory', nonInstant.map((s) => s.row.id), { access: true });
+    return [...instantPicked, ...nonInstant];
   }
 
   /** 任务轨迹 → 候选记忆抽取（异步管线，不阻塞下一任务）。LLM 不可用/弃权时降级为直接沉淀任务要点。 */

@@ -129,8 +129,8 @@ export class AutoControl {
     if (!golden.length) return { pass: true, note: 'golden_empty' };
     let overlapSum = 0, n = 0;
     for (const g of golden) {
-      const a = executor.memory.retrieve(g.input, 5, cur).map((r) => r.row.id);
-      const b = executor.memory.retrieve(g.input, 5, next).map((r) => r.row.id);
+      const a = (await executor.memory.retrieve(g.input, 5, cur)).map((r) => r.row.id);
+      const b = (await executor.memory.retrieve(g.input, 5, next)).map((r) => r.row.id);
       if (!a.length && !b.length) continue;
       const inter = a.filter((x) => b.includes(x)).length;
       overlapSum += inter / Math.max(a.length, b.length, 1);
