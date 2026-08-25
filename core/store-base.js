@@ -67,7 +67,7 @@ export class Store {
     this.dataDir = dataDir;
     mkdirSync(join(dataDir, 'lost_and_found'), { recursive: true });
     this._db = new DatabaseSync(join(dataDir, 'agent.db'));
-    this._db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    this._db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.migrate();
   }
 

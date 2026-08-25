@@ -3,10 +3,46 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs';
 import { isAbsolute, resolve, join, relative, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import { lookup } from 'node:dns';
+import { promisify } from 'node:util';
+import { isIP } from 'node:net';
 import { CONFIG } from '../config/index.js';
 import { createSkill } from './skills/create-skill.js';
 
 const KEY_PATTERN = /sk-[a-zA-Z0-9]{16,}/;
+const lookupAll = promisify(lookup); // dns.lookup 是回调 API，须 promisify（{all:true} 时返回 [{address,family}]）
+
+/** IP 是否私网/回环/保留段（v4 全段 + v6 常见段）；非法格式一律视为私网拒绝 */
+function isPrivateIp(ip) {
+  const v = isIP(ip);
+  if (v === 4) {
+    const o = ip.split('.').map(Number);
+    const n = ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+    const inCidr = (base, bits) => (((n & (bits === 0 ? 0 : ((~0 << (32 - bits)) >>> 0))) >>> 0) === (base >>> 0)); // & 产出 int32 有符号，须再 >>>0 复原无符号
+    return inCidr(0x00000000, 8) || inCidr(0x0A000000, 8) || inCidr(0x64400000, 10) || inCidr(0x7F000000, 8)
+      || inCidr(0xA9FE0000, 16) || inCidr(0xAC100000, 12) || inCidr(0xC0A80000, 16) || inCidr(0xC6120000, 15)
+      || inCidr(0xE0000000, 4) || inCidr(0xF0000000, 4);
+  }
+  if (v === 6) {
+    const s = ip.toLowerCase();
+    if (s === '::1' || s === '::' || s.startsWith('fe80:') || s.startsWith('fc') || s.startsWith('fd')) return true;
+    if (s.startsWith('::ffff:')) { // v4 映射地址：递归校验内层
+      const inner = s.slice(7);
+      return isIP(inner) === 4 ? isPrivateIp(inner) : true;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** SSRF 域名防线：解析全部 A/AAAA 记录逐个校验（拦数字 IP/十六进制/DNS 重绑定/映射地址） */
+async function assertPublicHost(hostname) {
+  let ips;
+  try { ips = await lookupAll(hostname, { all: true }); } catch { throw new Error(`域名解析失败：${hostname}`); }
+  for (const { address } of ips) {
+    if (isPrivateIp(address)) throw new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问`);
+  }
+}
 
 /** 路径囚禁：解析后必须落在 sandbox 根内（防 ../ 与绝对路径逃逸） */
 function confine(p, root) {
@@ -21,6 +57,9 @@ function confine(p, root) {
   }
   return { ok: true, abs };
 }
+
+/** 导出供单元测试（tests/unit/ssrf.test.js） */
+export { isPrivateIp, assertPublicHost };
 
 export class ToolRuntime {
   /** LLM 常见幻觉工具名 → 真实注册名的模糊映射（规划器宽容层） */
@@ -160,13 +199,30 @@ export class ToolRuntime {
         return { ok: true };
       },
       run: async (p) => {
-        const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), CONFIG.TOOL_TIMEOUT_MS);
+        // 逐跳抓取：redirect:manual + 每跳解析域名并校验 IP——
+        // 正则拦不住数字 IP（2130706433=127.0.0.1）/DNS 重绑定/::ffff: 映射/公网 302 跳私网
+        let url = String(p.url), res = null;
+        for (let hop = 0; hop <= 3; hop++) {
+          const u = new URL(url);
+          await assertPublicHost(u.hostname); // 解析全部 A/AAAA 记录逐个校验，命中私网即拒绝
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), CONFIG.TOOL_TIMEOUT_MS);
+          try {
+            res = await fetch(url, {
+              signal: ac.signal,
+              redirect: 'manual',
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; evo-agent/1.0)', Accept: 'text/html,application/json,text/plain,*/*' },
+            });
+          } finally { clearTimeout(timer); }
+          if ([301, 302, 303, 307, 308].includes(res.status)) {
+            const loc = res.headers.get('location');
+            if (!loc || hop === 3) throw new Error('重定向次数超限（>3）或缺少 Location');
+            url = new URL(loc, url).href;
+            continue;
+          }
+          break;
+        }
         try {
-          const res = await fetch(p.url, {
-            signal: ac.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; evo-agent/1.0)', Accept: 'text/html,application/json,text/plain,*/*' },
-          });
           let text = (await res.text()).slice(0, 65_536);
           const ct = res.headers.get('content-type') ?? '';
           if (ct.includes('html')) {
@@ -181,7 +237,7 @@ export class ToolRuntime {
             text = [title && `标题：${title}`, metaDesc && `描述：${metaDesc.trim()}`, `正文：${body}`].filter(Boolean).join('\n');
           }
           return `HTTP ${res.status}: ${text.slice(0, 4096)}`;
-        } finally { clearTimeout(timer); }
+        } catch (e) { throw new Error(`响应读取失败：${String(e?.message ?? e).slice(0, 120)}`); }
       },
     });
     // ── 文件列表别名：ls = fs_list（兼容常见用法）──
