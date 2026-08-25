@@ -32,7 +32,7 @@ export class MemorySystem {
    * 写入记忆（带免疫期、时间元数据、写前去重与冲突消解）。
    * 返回 { status: 'created' | 'dup_skipped' | 'superseded', id? }
    */
-  async create({ content, kind = 'semantic', tier = 'short', importance = 0.5, taskId = null, skipLLM = false }) {
+  async create({ content, kind = 'semantic', tier = 'short', importance = 0.5, taskId = null, skipLLM = false, conversationId = null }) {
     const now = Date.now();
     const imm = now + CONFIG.IMMUNITY_HOURS * 3600_000;
 
@@ -63,7 +63,7 @@ export class MemorySystem {
         embedding: null,
         quarantined_at: null, purge_after: null, last_used_at: now,
         tier, kind, content, importance, access_count: 0,
-        expires_at: expiresAt, supersede_of: supersedeOf, entities: null, task_id: taskId,
+        expires_at: expiresAt, supersede_of: supersedeOf, entities: conversationId ? JSON.stringify({ conversation_id: conversationId }) : null, task_id: taskId,
       });
     });
     return { status: supersedeOf ? 'superseded' : 'created', id };
@@ -104,7 +104,7 @@ export class MemorySystem {
       const recency = Number.isFinite(rec) ? rec : 0;
       scored.push({ row, score: weights.sim * h.score + weights.quality * row.quality_score + weights.recency * recency });
     }
-    const picked = scored.filter((x) => x.score > 0.15) // 低分不注入，防上下文污染
+    const picked = scored.filter((x) => x.score > 0.25) // 低分不注入，防上下文污染（0.15→0.25：E2E 观察 8 条弱相关记忆混入）
       .sort((a, b) => b.score - a.score)
       .slice(0, topK);
     if (picked.length) this.store.touch('memory', picked.map((s) => s.row.id), { access: true });
@@ -139,6 +139,7 @@ export class MemorySystem {
         tier: 'short',
         importance,
         taskId: trace.id,
+        conversationId: trace.conversationId ?? null, // 会话标签：同会话后续任务检索时权重加倍
       }));
     }
     return results;

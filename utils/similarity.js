@@ -17,6 +17,41 @@ export function tokenize(text) {
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'is', 'are', 'of', 'to', 'and', 'in', 'on', 'for', 'with', 'that', 'this', 'it', 'as', 'be', 'by', 'or', 'at', 'if']);
 
+/** 任务域同义词组（查询侧扩展用）：BM25 纯词法对跨说法召回弱（"省钱"检索不到"成本优化"），
+ *  命中任一词 → 组内其余词的 token 并入查询。文档侧不扩（防索引膨胀）。 */
+const SYNONYM_GROUPS = [
+  ['省钱', '节约', '节省', '降本', '成本优化', 'cost'],
+  ['新闻', '资讯', '热点', '时事', 'news'],
+  ['模型', '大模型', 'llm', 'ai'],
+  ['汇率', '货币', '外汇', 'exchange', 'rate'],
+  ['天气', '气温', '预报', 'weather'],
+  ['文档', 'docs', 'documentation', '说明'],
+  ['报错', '错误', 'error', '异常', 'bug', '失败'],
+  ['部署', 'deploy', '上线', '发布', 'release'],
+  ['配置', 'config', '设置', 'settings', '参数'],
+  ['搜索', 'search', '检索', '查询', '查找'],
+  ['总结', '摘要', 'summary', '概括', '归纳'],
+  ['对比', '比较', 'compare', 'versus', 'vs', '区别'],
+  ['优化', 'optimize', '改进', 'improve', '提升', '调优'],
+  ['价格', '价钱', '费用', 'price', 'pricing'],
+  ['速度', '性能', 'latency', 'performance', '快慢'],
+  ['安装', 'install', '部署依赖', 'setup'],
+];
+
+/** 查询扩展：原 token + 命中同义词组的扩展 token（上界 20 防查询爆炸） */
+export function expandQuery(text) {
+  const toks = tokenize(text);
+  if (!toks.length) return toks;
+  const lower = String(text ?? '').toLowerCase();
+  const extra = new Set();
+  for (const group of SYNONYM_GROUPS) {
+    if (group.some((w) => lower.includes(w.toLowerCase()))) {
+      for (const w of group) for (const t of tokenize(w)) if (!toks.includes(t)) extra.add(t);
+    }
+  }
+  return [...toks, ...[...extra].slice(0, 20)];
+}
+
 /** ---------- BM25（k1=1.5, b=0.75） ---------- */
 export class BM25Index {
   constructor(docs = []) {
@@ -73,9 +108,10 @@ export class BM25Index {
     return s;
   }
 
-  /** top-K 检索：倒排召回共享 token 的候选再打分（O(命中集) 而非 O(全库)），返回 [{id, score}]，score 归一到 [0,1] */
+  /** top-K 检索：倒排召回共享 token 的候选再打分（O(命中集) 而非 O(全库)），返回 [{id, score}]，score 归一到 [0,1]
+   *  查询走 expandQuery（同义词扩展）：跨说法召回（"省钱" ↔ "成本优化"） */
   search(queryText, topK = 8) {
-    const q = tokenize(queryText);
+    const q = expandQuery(queryText);
     if (!q.length || this.docTokens.size === 0) return [];
     const cand = new Set();
     for (const t of q) {

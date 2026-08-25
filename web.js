@@ -150,6 +150,11 @@ export class WebServer {
     };
 
     try {
+      // 最简鉴权：配置 AUTH_TOKEN 后，/api/* 必须携带 Authorization: Bearer <token>（页面本身可加载，API 拒绝）
+      if (CONFIG.AUTH_TOKEN && path.startsWith('/api/')) {
+        const got = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+        if (got !== CONFIG.AUTH_TOKEN) return send(401, { error: '未授权（需 Authorization: Bearer token）' });
+      }
       if (req.method === 'GET' && path === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); // 前端迭代频繁，禁缓存防止浏览器跑旧 JS
         res.end(readFileSync(join(ROOT, 'web', 'chat.html'), 'utf8'));
@@ -328,8 +333,15 @@ export class WebServer {
         quick,
         silent: true,
         taskId,
+        conversationId: conv.id, // 会话隔离：记忆检索本会话加权、沉淀记忆携带会话标签
         isAborted: () => live.abort === true, // 停止端点置位 → LLM 等待/排队/步骤边界协作式中断
-        onProgress: (e) => { live.events.push(e); send({ type: 'stage', ...e }); },
+        onProgress: (e) => {
+          // delta 打字机事件：合并进上一条（同流相邻 delta 文本拼接）——数百 token 不膨胀 live.events，轮询补渲染下标仍对齐
+          const last = live.events[live.events.length - 1];
+          if (e.stage === 'delta' && last?.stage === 'delta') last.text += e.text;
+          else live.events.push(e);
+          send({ type: 'stage', ...e });
+        },
       });
       const meta = {
         outcome: trace.outcome,

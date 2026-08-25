@@ -47,6 +47,8 @@ export const CONFIG = {
   MOCK: (env.SPA_MOCK ?? local.MOCK ?? '0') === '1',
   DATA_DIR: env.SPA_DATA_DIR ?? local.DATA_DIR ?? join(ROOT, 'data'),
   ROOT,
+  // 访问鉴权：设置 SPA_AUTH_TOKEN 后所有 /api/* 需携带 Authorization: Bearer <token>；空则完全开放（本地/单人使用）
+  AUTH_TOKEN: env.SPA_AUTH_TOKEN ?? local.AUTH_TOKEN ?? '',
 
   // ── 上下文与检索 ──
   MAX_CONTEXT_TOKEN: BOUNDS.MAX_CONTEXT_TOKEN[1],

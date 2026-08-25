@@ -100,6 +100,7 @@ export class Store {
       this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)').run(Date.now());
     }
     this.migrateV2();
+    this.migrateV3();
   }
 
   /** v2：增量列（幂等，SQLite 无 IF NOT EXISTS 的 ADD COLUMN 用 pragma 守卫） */
@@ -117,6 +118,17 @@ export class Store {
       this.db.exec('ALTER TABLE experiences ADD COLUMN frozen_at INTEGER');
     }
     this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)').run(Date.now());
+  }
+
+  /** v3：fail_streak 列（技能连续失败计数，2 连败快速 COOLING 用） */
+  migrateV3() {
+    const applied = this.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v ?? 1;
+    if (applied >= 3) return;
+    const cols = (table) => this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols('skills').includes('fail_streak')) {
+      this.db.exec('ALTER TABLE skills ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0');
+    }
+    this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)').run(Date.now());
   }
 
   // ── system_state ──

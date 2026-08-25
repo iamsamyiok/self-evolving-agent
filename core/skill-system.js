@@ -147,10 +147,20 @@ export class SkillSystem {
     // 热度：7 天内命中 ≥5 次且 W ≥ 晋升线 → hot（量化定义 §5.1.2）
     const w = wilsonLowerBound(success, n);
     if (s.state === 'ACTIVE') {
+      // 快速熔断：连续 2 次失败立即 COOLING（不等 Wilson 收敛——坏技能每多跑一次都是浪费的 LLM 调用）
+      const streakField = { fail_streak: ok ? 0 : (s.fail_streak ?? 0) + 1 };
+      if (!ok && streakField.fail_streak >= 2) {
+        this.store.bumpStats('skill', skillId, { ...fields, ...streakField });
+        this.store.transition('skill', skillId, 'COOLING');
+        this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'STREAK_COOLING', dimension: 'quality', reason: '连续 2 次执行失败，快速熔断进 COOLING（防坏技能持续浪费调用）', evidence: { fail_streak: streakField.fail_streak }, status: 'DONE' });
+        return;
+      }
       const band = hysteresis(q, { promote: CONFIG.SKILL_PROMOTE_W, demote: CONFIG.SKILL_DEMOTE_W, purge: CONFIG.SKILL_PURGE_W });
       if (n >= 5 && w >= CONFIG.SKILL_PROMOTE_W && this.hitsInDays(skillId, 7) >= 5) fields.heat = 'hot';
-      else if (band === 'demote') { this.store.bumpStats('skill', skillId, fields); this.store.transition('skill', skillId, 'COOLING'); return; }
+      else if (band === 'demote') { this.store.bumpStats('skill', skillId, { ...fields, ...streakField }); this.store.transition('skill', skillId, 'COOLING'); return; }
       else if (s.heat === 'hot' && this.hitsInDays(skillId, 7) < 5) fields.heat = 'warm';
+      this.store.bumpStats('skill', skillId, { ...fields, ...streakField });
+      return;
     } else if (s.state === 'COOLING') {
       const band = hysteresis(q, { promote: CONFIG.SKILL_PROMOTE_W, demote: CONFIG.SKILL_DEMOTE_W, purge: CONFIG.SKILL_PURGE_W });
       if (band === 'promote') { this.store.bumpStats('skill', skillId, fields); this.store.transition('skill', skillId, 'ACTIVE'); return; }

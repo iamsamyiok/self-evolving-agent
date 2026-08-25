@@ -43,9 +43,17 @@ export class ExperienceEngine {
     });
     if (!out) return null; // 弃权：无证据不硬造（LLM 输出不可靠时宁可不入池）
 
+    // 平凡成功不入池：成功 + 规则/避坑全空或无具体干货（无工具名/方法词）→ 只有失败教训和有方法论的成功才值得沉淀
+    if (trace.outcome === 'SUCCESS') {
+      const substance = [...(out.rules ?? []), ...(out.pitfalls ?? [])].join(' ');
+      const trivial = /(按步骤|按计划|依次执行|仔细|认真|顺利完成|常规流程|无需特殊)/.test(substance);
+      const specific = /(tool:|news_search|http_get|run_js|calc|fs_|skill:|重新规划|去重|白名单|模板|公式|URL|api)/i.test(substance);
+      if (!specific || trivial || substance.trim().length < 8) return null;
+    }
+
     const evidence = [{ task_id: trace.id, outcome: trace.outcome, trace_hash: traceHash(trace.steps) }];
     const signature = [trace.input, out.summary].join(' ');
-    const dup = this.findSimilar(signature);
+    const dup = this.findSimilar(trace.input, out.summary);
     if (dup) {
       await runExclusive(`experience:${dup.id}`, () => {
         const ev = this.store.get('experience', dup.id);
@@ -84,22 +92,33 @@ export class ExperienceEngine {
     return { status: 'created', id };
   }
 
-  findSimilar(signature) {
-    const tokA = tokenize(signature);
-    for (const h of this.idx.index.search(signature, 3)) {
+  /** 相似合并检测：input / summary 分别与存量 task_signature 比对，任一维度高相似即视为同一经验族——
+   *  历史教训：input+summary 拼接成串再整串比 Jaccard 会被稀释，同输入不同措辞的经验重复入库 8 条 */
+  findSimilar(input, summary) {
+    const query = `${String(input ?? '')} ${String(summary ?? '')}`;
+    const tokIn = tokenize(String(input ?? ''));
+    const tokSum = tokenize(String(summary ?? ''));
+    for (const h of this.idx.index.search(query, 3)) {
       const row = this.idx.rows.get(h.id);
-      if (row && jaccard(tokA, tokenize(row.task_signature)) >= CONFIG.MEMORY_DUP_JACCARD) return row;
+      if (!row) continue;
+      const tokSig = tokenize(String(row.task_signature ?? ''));
+      const simIn = tokIn.length ? jaccard(tokIn, tokSig) : 0;
+      const simSum = tokSum.length ? jaccard(tokSum, tokSig) : 0;
+      if (Math.max(simIn, simSum) >= CONFIG.MEMORY_DUP_JACCARD) return row;
     }
     return null;
   }
 
-  /** 检索：w·相似度 + w·Q（§5.3，权重可调参）；命中记账走 touch 旁路 */
+  /** 检索：w·相似度 + w·Q（§5.3，权重可调参）；命中记账走 touch 旁路；score ≤0.3 不注入（防弱相关经验挤占上下文） */
   retrieve(query, topK = CONFIG.RETRIEVAL_TOP_K, weights = { sim: 0.6, quality: 0.4 }) {
     const hits = this.idx.index.search(query, topK);
     const out = [];
     for (const h of hits) {
       const row = this.idx.rows.get(h.id);
-      if (row) out.push({ row, score: weights.sim * h.score + (weights.quality ?? 0.4) * row.quality_score });
+      if (!row) continue;
+      const score = weights.sim * h.score + (weights.quality ?? 0.4) * row.quality_score;
+      if (score <= 0.3) continue;
+      out.push({ row, score });
     }
     if (out.length) this.store.touch('experience', out.map((o) => o.row.id), {});
     return out;

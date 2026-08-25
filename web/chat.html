@@ -255,7 +255,20 @@ function md(s){
 }
 
 /* ── 初始化 ── */
-async function init(){
+ async function init(){
+  // 鉴权：包装 fetch 自动附加 Bearer；401 时引导输入令牌（服务端 SPA_AUTH_TOKEN 启用时）
+  const _fetch=window.fetch.bind(window);
+  window.fetch=async(input,init={})=>{
+    const tk=localStorage.getItem('evo_token');
+    const headers=new Headers(init.headers||{});
+    if(tk&&!headers.has('Authorization'))headers.set('Authorization','Bearer '+tk);
+    const res=await _fetch(input,{...init,headers});
+    if(res.status===401&&!init.__retried){
+      const t=prompt('访问受保护，请输入访问令牌（SPA_AUTH_TOKEN）：');
+      if(t){localStorage.setItem('evo_token',t);return window.fetch(input,{...init,__retried:true});}
+    }
+    return res;
+  };
   await refreshConvs();
   await refreshLlmPill();
   setInterval(refreshEvoPill,5000);
@@ -482,6 +495,7 @@ async function doSend(){
   const body=d.querySelector('.body');
   const view=makeExecView(body);
   let meta={},taskId=null,handled=0; // handled：已渲染的进度事件数（轮询补渲染时跳过）
+  let streamBub=null; // answer 打字机气泡（delta 事件增量写入；renderDone 时整体重写）
   const renderStage=(evt)=>{
     if(evt.stage==='start'){view.set('正在接收任务…');if(evt.taskId){taskId=evt.taskId;activeTaskId=evt.taskId;}}
     else if(evt.stage==='pre_search'){view.set('预检索真实信息（规划前）…');view.cur('预检索：'+(String(evt.query||'').slice(0,48)+'…'));}
@@ -492,6 +506,12 @@ async function doSend(){
     else if(evt.stage==='degrade'){view.warn(`「${evt.goal||''}」降级为自身推理（${evt.reason||''}）`);}
     else if(evt.stage==='step_done'){view.stepDone({goal:evt.goal||'',output:evt.output||evt.preview});}
     else if(evt.stage==='answer'){view.set('综合回答中…');view.cur(evt.label||'综合回答');}
+    else if(evt.stage==='delta'){
+      // token 级打字机：首个 delta 建气泡，后续追加；完成后 renderDone 用 md 版整体重写
+      if(!streamBub){view.finishLine();streamBub=document.createElement('div');streamBub.className='bub';streamBub.style.whiteSpace='pre-wrap';body.appendChild(streamBub);}
+      streamBub.textContent+=String(evt.text||'');
+      const m=$('messages');m.scrollTop=m.scrollHeight;
+    }
     else if(evt.stage==='llm_wait'){
       // 限流等待透明化：任务没死，是在排队等配额（免费版 ~20 次/分钟）
       const sec=evt.waitSec??'?';
@@ -502,7 +522,7 @@ async function doSend(){
     }
   };
   const renderDone=(q)=>{
-    view.done();meta=q.meta||{};meta.thinkingHtml=view.html();
+    view.done();meta=q.meta||{};meta.thinkingHtml=view.html();streamBub=null;
     // 流式 done 事件载荷是 message.content；轮询恢复载荷是 result.answer——两者都兼容
     const answer=q.answer??q.content;
     body.innerHTML=aiHtml(view.html(),answer||('（任务失败：'+(q.error||'未知')+'）'),{...meta,outcome:q.outcome,basis:q.basis,durationMs:q.durationMs});

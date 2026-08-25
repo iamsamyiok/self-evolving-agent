@@ -177,7 +177,7 @@ export async function pingLLM({ baseUrl, apiKey, model } = {}) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 原始 chat 调用（带重试/超时/熔断/标签计量）。MOCK 模式走 mockChat。 */
-export async function chat({ messages, temperature = 0.2, json = false, maxTokens = 2048, label = null }) {
+export async function chat({ messages, temperature = 0.2, json = false, maxTokens = 2048, label = null, stream = false, onDelta = null }) {
   if (CONFIG.MOCK) {
     usage.calls++;
     const r = mockChat({ messages });
@@ -203,7 +203,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       const res = await fetch(`${eff.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${eff.apiKey}` },
-        body: JSON.stringify({ model: eff.model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
+        body: JSON.stringify({ model: eff.model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}), ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }),
         signal: ac.signal,
       });
       clearTimeout(timer); clearInterval(abortWatch);
@@ -224,6 +224,35 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       }
       if (res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
       if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`), { retryable: false });
+      // 流式分支：SSE 逐 delta 回调（onDelta），完整文本照常返回——重试/429/熔断语义与非流式完全一致
+      if (stream && onDelta && res.body) {
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '', full = '', u = null;
+        while (true) {
+          if (isAborted()) { try { reader.cancel(); } catch {} throw ABORT_ERR; }
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i).trim();
+            buf = buf.slice(i + 1);
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') continue;
+            try {
+              const j = JSON.parse(payload);
+              const d = j?.choices?.[0]?.delta?.content ?? '';
+              if (d) { full += d; try { onDelta(d); } catch { /* 回调失败不打断流 */ } }
+              if (j?.usage) u = j.usage;
+            } catch { /* SSE 半包跳过 */ }
+          }
+        }
+        breakerRecord(true);
+        recordUsage(u, label);
+        return { text: full, usage: u };
+      }
       const data = await res.json();
       breakerRecord(true);
       recordUsage(data?.usage, label);
@@ -338,7 +367,7 @@ function mockChat({ messages }) {
   }
   if (text.includes('复盘器')) {
     const ok = text.includes('结果：SUCCESS');
-    return { text: JSON.stringify({ summary: ok ? '按步骤推进即可完成任务' : '需在规划阶段确认步骤可执行性', rules: ['先理解任务再拆步'], pitfalls: ['不要跳过验证'], failure_taxonomy: ok ? null : 'plan' }), usage: { prompt_tokens: 110, completion_tokens: 50 } };
+    return { text: JSON.stringify({ summary: ok ? '多步任务按"理解→拆步→验证"推进，工具类步骤优先复用已有 tool: 知识' : '规划阶段须确认步骤可执行性，避免依赖不存在的工具', rules: [ok ? '计算类步骤用 tool:calc 精确执行，禁止心算' : '拆步前先核对工具清单（tool: 前缀可用名）'], pitfalls: ['不要跳过结果验证'], failure_taxonomy: ok ? null : 'plan' }), usage: { prompt_tokens: 110, completion_tokens: 50 } };
   }
   if (text.includes('技能提炼器')) {
     if (h % 3 === 0) return { text: JSON.stringify({ name: null }), usage: { prompt_tokens: 90, completion_tokens: 10 } };
