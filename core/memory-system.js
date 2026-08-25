@@ -57,10 +57,13 @@ export class MemorySystem {
     const id = uuid7();
     const expiresAt = tier === 'short' ? now + 7 * 86_400_000 : null;
     await runExclusive(`memory:${id}`, () => {
+      // quality 分化：高重要性记忆奖励，低重要性惩罚（避免琐碎内容污染检索池）
+      const qBase = Math.max(0.3, importance);
+      const qScore = importance >= 0.7 ? Math.min(1.0, qBase + 0.1) : importance < 0.5 ? Math.max(0.3, qBase - 0.05) : qBase;
       this.store.insert('memory', {
         id, state: 'ACTIVE', version: 1, parent_id: null, origin: 'evolve',
         created_at: now, updated_at: now, immunity_until: imm,
-        execution_count: 0, quality_score: Math.max(0.3, importance), // 初始质量 = 重要性（复用/沉淀动态修正）
+        execution_count: 0, quality_score: qScore, // 初始质量 = 重要性（复用/沉淀动态修正）
         embedding: null,
         quarantined_at: null, purge_after: null, last_used_at: now,
         tier, kind, content, importance, access_count: 0,
@@ -165,6 +168,30 @@ export class MemorySystem {
       }));
     }
     return results;
+  }
+
+  /** 任务结束后动态调整记忆 tier：hot 晋升 / cold 降级 */
+  adjustTier(id) {
+    const m = this.store.get('memory', id);
+    if (!m) return;
+    const now = Date.now();
+    const daysSinceUse = (now - (m.last_used_at ?? m.created_at)) / 86_400_000;
+    const w = m.quality_score;
+    let newTier = m.tier;
+    // 晋升：高 Q + 近期高频访问 → short→long
+    if (m.tier === 'short' && w >= 0.75 && m.access_count >= 8) newTier = 'long';
+    // 降级：长期未访问 → long→short
+    if (m.tier === 'long' && daysSinceUse >= 30 && m.access_count < 3) newTier = 'short';
+    // 冷数据归档：零访问超 60 天 → 不入检索池
+    if (m.access_count === 0 && daysSinceUse >= 60 && m.tier === 'short') newTier = 'short'; // 保持 short 但由 purify 清理
+    if (newTier !== m.tier) {
+      this.store.update('memory', id, { tier: newTier, updated_at: now });
+    }
+  }
+
+  /** 批量 tier 调度：按策略对 topK 命中记忆做 tier 调整（由进化钩子周期性调用） */
+  batchAdjustTiers(topHitIds) {
+    for (const id of topHitIds.slice(0, 20)) this.adjustTier(id);
   }
 }
 

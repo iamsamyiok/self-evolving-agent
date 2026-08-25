@@ -182,6 +182,17 @@ export class SkillSystem {
       const band = hysteresis(q, { promote: CONFIG.SKILL_PROMOTE_W, demote: CONFIG.SKILL_DEMOTE_W, purge: CONFIG.SKILL_PURGE_W });
       if (band === 'promote') { this.store.bumpStats('skill', skillId, fields); this.store.transition('skill', skillId, 'ACTIVE'); return; }
     }
+    // Step7：低成功率兜底 —— 即使尚未积累到 N≥5，若失败占比≥50% 且失败次数≥3，强制 COOLING
+    // 防止新技能在早期少量调用中被误判为"潜力股"而继续消耗
+    if (n >= 3 && fail >= 3 && fail / n >= 0.5) {
+      this.snapshotSkill(skillId, 'low_success_rate_cooling');
+      this.store.bumpStats('skill', skillId, fields);
+      if (s.state !== 'COOLING') {
+        this.store.transition('skill', skillId, 'COOLING');
+        this.store.logPurge({ epoch: this.store.epoch, entityType: 'skill', entityId: skillId, action: 'LOW_SUCCESS_COOLING', dimension: 'quality', reason: `低成功率强制冷却（${fail}/${n} 失败，失败率 ${(fail/n*100).toFixed(0)}%）`, evidence: { fail_count: fail, total: n, rate: Number((fail/n).toFixed(2)) }, status: 'DONE' });
+      }
+      return;
+    }
     // 统计记账走 bumpStats 直写：每次任务后的执行记账不触发检索索引重建
     this.store.bumpStats('skill', skillId, fields);
   }

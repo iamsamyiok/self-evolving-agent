@@ -57,11 +57,18 @@ export class ExperienceEngine {
       await runExclusive(`experience:${dup.id}`, () => {
         const ev = this.store.get('experience', dup.id);
         const merged = [...JSON.parse(ev.evidence), ...evidence].slice(-20);
+        const sc = ev.success_count + (trace.outcome === 'SUCCESS' ? 1 : 0);
+        const fc = ev.fail_count + (trace.outcome === 'FAIL' ? 1 : 0);
+        const n = ev.execution_count + 1;
+        // 合并时按新胜率微调 quality_score：成功+0.05，失败-0.05，封顶 0.95 / 保底 0.3
+        let q = ev.quality_score + (trace.outcome === 'SUCCESS' ? 0.05 : -0.05);
+        q = Math.min(0.95, Math.max(0.3, q));
         this.store.update('experience', dup.id, {
           sample_count: ev.sample_count + 1,
-          success_count: ev.success_count + (trace.outcome === 'SUCCESS' ? 1 : 0),
-          fail_count: ev.fail_count + (trace.outcome === 'FAIL' ? 1 : 0),
-          execution_count: ev.execution_count + 1,
+          success_count: sc,
+          fail_count: fc,
+          execution_count: n,
+          quality_score: q,
           evidence: JSON.stringify(merged),
           last_used_at: Date.now(),
         });
@@ -71,16 +78,23 @@ export class ExperienceEngine {
 
     const id = uuid7();
     const now = Date.now();
+    // rules/pitfalls 单条截断 100 字符（长条目无检索价值，且浪费上下文预算）
+    const cut = (s) => String(s ?? '').slice(0, 100);
+    const rulesOut = (out.rules ?? []).map(cut).slice(0, 5);
+    const pitfallsOut = (out.pitfalls ?? []).map(cut).slice(0, 5);
+    // quality_score 分化：成功沉淀的知识值得更高权重，失败教训保持中位
+    const baseQ = trace.outcome === 'SUCCESS' ? 0.65 : 0.45;
     await runExclusive(`experience:${id}`, () => {
       this.store.insert('experience', {
         id, state: 'ACTIVE', version: 1, parent_id: null, origin: 'evolve',
         created_at: now, updated_at: now, immunity_until: now + CONFIG.IMMUNITY_HOURS * 3600_000,
-        execution_count: 1, quality_score: 0.5, embedding: null,
+        execution_count: 1, quality_score: baseQ, embedding: null,
         quarantined_at: null, purge_after: null, last_used_at: now,
+        tier: 'short',
         task_signature: signature.slice(0, 500),
         summary: out.summary.slice(0, 300),
-        rules: JSON.stringify((out.rules ?? []).slice(0, 5)),
-        pitfalls: JSON.stringify((out.pitfalls ?? []).slice(0, 5)),
+        rules: JSON.stringify(rulesOut),
+        pitfalls: JSON.stringify(pitfallsOut),
         failure_taxonomy: trace.outcome === 'FAIL' ? (out.failure_taxonomy ?? 'llm') : null,
         evidence: JSON.stringify(evidence),
         sample_count: 1,

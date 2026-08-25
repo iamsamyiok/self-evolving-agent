@@ -107,6 +107,16 @@ export class PurifyCenter {
           out.push({ entityType: 'memory', id: m.id, kind: 'low_value', rule: false, evidence: { importance_now: Number(I.toFixed(3)), line: CONFIG.MEMORY_KEEP_LINE, n: m.access_count } });
         }
       }
+      // Step4：零访问冷数据 —— 30 天不进检索池 / 60 天进入淘汰观察
+      if (m.tier === 'short' && m.access_count === 0) {
+        const idleDays = (now - (m.last_used_at ?? m.created_at)) / 86_400_000;
+        if (idleDays >= 60) {
+          out.push({ entityType: 'memory', id: m.id, kind: 'cold_mem', rule: true, evidence: { idle_days: Math.round(idleDays) } });
+        } else if (idleDays >= 30) {
+          // 降级 tier，不进检索池但保留
+          this.store.update('memory', m.id, { tier: 'cool', updated_at: now });
+        }
+      }
     }
     const byTier = {};
     for (const m of memories) (byTier[m.tier] ??= []).push(m);
@@ -127,6 +137,11 @@ export class PurifyCenter {
     const experiences = this.store.list('experience', "WHERE state = 'ACTIVE'");
     for (const e of experiences) {
       const staleDays = (now - (e.last_used_at ?? e.created_at)) / 86_400_000;
+      // Step4：经验零访问 30 天 → DEPRECATED（经验比记忆容忍度更高，30 天无复用即过期）
+      if (staleDays >= 30 && e.execution_count === 0) {
+        out.push({ entityType: 'experience', id: e.id, kind: 'stale', rule: true, evidence: { stale_days: Math.round(staleDays) } });
+        continue;
+      }
       if (staleDays >= CONFIG.EXPERIENCE_STALE_DAYS) {
         out.push({ entityType: 'experience', id: e.id, kind: 'stale', rule: true, evidence: { stale_days: Math.round(staleDays) } });
         continue;
@@ -166,11 +181,21 @@ export class PurifyCenter {
   // ═════════ ① DETECT（技能维度，§6.2.3，仅深度净化）═════════
   detectSkills(now) {
     const out = [];
-    const skills = this.store.list('skill', "WHERE state IN ('ACTIVE','COOLING')");
+    const skills = this.store.list('skill', "WHERE state IN ('ACTIVE','COOLING','DRAFT')");
     for (const s of skills) {
       const idleDays = (now - (s.last_used_at ?? s.created_at)) / 86_400_000;
+      // Step5：DRAFT 技能 7 天生存期 —— 超时未验证则自动失效（避免垃圾 DRAFT 堆积）
+      if (s.state === 'DRAFT' && idleDays >= 7) {
+        out.push({ entityType: 'skill', id: s.id, kind: 'draft_expired', rule: true, evidence: { idle_days: Math.round(idleDays) } });
+        continue;
+      }
+      // Step6：命名校验 —— skill_* 随机命名 <7 天且未经过验证的 DRAFT 直接清理
+      if (s.state === 'DRAFT' && /^skill_\d{10,}$/.test(s.name) && idleDays < 7) {
+        out.push({ entityType: 'skill', id: s.id, kind: 'bad_name_draft', rule: true, evidence: { name: s.name, idle_days: Math.round(idleDays) } });
+        continue;
+      }
       // 僵尸技能：30 天零调用零迭代
-      if (idleDays >= CONFIG.SKILL_ZOMBIE_DAYS) {
+      if (idleDays >= CONFIG.SKILL_ZOMBIE_DAYS && s.state !== 'DRAFT') {
         out.push({ entityType: 'skill', id: s.id, kind: 'zombie_skill', rule: true, evidence: { idle_days: Math.round(idleDays) } });
         continue;
       }
@@ -182,17 +207,18 @@ export class PurifyCenter {
       }
     }
     // 错误技能：失败占比极高 + judge 认为步骤有逻辑错误（复现校验在 executeRepair 内）
-    const suspect = skills
+    const actives = skills.filter((s) => s.state !== 'DRAFT');
+    const suspect = actives
       .filter((s) => s.execution_count >= CONFIG.MIN_EVIDENCE_N && s.fail_count / s.execution_count >= 0.8)
       .sort((a, b) => b.fail_count - a.fail_count)[0];
     if (suspect) out.push({ entityType: 'skill', id: suspect.id, kind: 'error_skill', rule: false, evidence: { fail_rate: Number((suspect.fail_count / suspect.execution_count).toFixed(2)) } });
 
     // 冗余技能：场景相似 ≥0.90 → 保留 verified/高 Q 者
-    if (skills.length >= 2) {
+    if (actives.length >= 2) {
       const seen = new Set();
-      for (const p of candidatePairs(skills.map((s) => ({ id: s.id, text: `${s.name} ${s.scenario} ${s.description}` })))) {
+      for (const p of candidatePairs(actives.map((s) => ({ id: s.id, text: `${s.name} ${s.scenario} ${s.description}` })))) {
         if (p.jaccard < CONFIG.SKILL_DUP_JACCARD) continue;
-        const a = skills.find((s) => s.id === p.a), b = skills.find((s) => s.id === p.b);
+        const a = actives.find((s) => s.id === p.a), b = actives.find((s) => s.id === p.b);
         if (seen.has(a.id) || seen.has(b.id)) continue;
         const better = ((a.verified - b.verified) || (a.quality_score - b.quality_score)) >= 0 ? a : b;
         const loser = better === a ? b : a;

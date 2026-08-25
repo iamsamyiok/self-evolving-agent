@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS skills (
   quarantined_at INTEGER,
   purge_after    INTEGER,
   last_used_at   INTEGER,
+  tier          TEXT NOT NULL DEFAULT 'warm',  -- v5: instant/warm/cool — 用于自动晋升/降级决策
   name          TEXT NOT NULL,
   scenario      TEXT NOT NULL,
   description   TEXT NOT NULL,
@@ -31,7 +32,9 @@ CREATE TABLE IF NOT EXISTS skills (
   success_count INTEGER NOT NULL DEFAULT 0,
   fail_count    INTEGER NOT NULL DEFAULT 0,
   verified      INTEGER NOT NULL DEFAULT 0,
-  heat          TEXT NOT NULL DEFAULT 'warm'
+  heat          TEXT NOT NULL DEFAULT 'warm',
+  fail_streak   INTEGER NOT NULL DEFAULT 0,
+  frozen_at     INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS memories (
@@ -75,6 +78,7 @@ CREATE TABLE IF NOT EXISTS experiences (
   quarantined_at INTEGER,
   purge_after    INTEGER,
   last_used_at   INTEGER,
+  tier          TEXT NOT NULL DEFAULT 'short',  -- v5: short/medium/long — 控制经验检索时的缓存优先级
   task_signature TEXT NOT NULL,           -- 检索用关键词集（BM25 降级档）
   summary        TEXT NOT NULL,
   rules          TEXT NOT NULL,           -- JSON: string[]
@@ -83,7 +87,8 @@ CREATE TABLE IF NOT EXISTS experiences (
   evidence       TEXT NOT NULL,           -- JSON: [{task_id, outcome, trace_hash}]
   sample_count   INTEGER NOT NULL DEFAULT 1,
   success_count  INTEGER NOT NULL DEFAULT 0,
-  fail_count     INTEGER NOT NULL DEFAULT 0
+  fail_count     INTEGER NOT NULL DEFAULT 0,
+  frozen_at      INTEGER
 );
 
 -- ───────── 净化留痕（先写日志再执行状态变更，§3.2 强制） ─────────

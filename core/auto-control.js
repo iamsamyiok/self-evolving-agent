@@ -1,7 +1,7 @@
 // core/auto-control.js —— L9 自愈管控观测层（§8/§6.2.5/§6.2.6）：心跳、三层预算、自动调参（界内）、策略净化、快照回滚、看门狗
-import { writeFileSync, readFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { spawn } from 'node:child_process';
 import { CONFIG, BOUNDS, assertInBounds } from '../config/index.js';
 import { getUsage, budgetExhausted } from './llm-adapter.js';
@@ -235,6 +235,73 @@ export class AutoControl {
     if (restarts.count > 3) alerts.push({ type: 'watchdog_restarts', count: restarts.count });
     for (const a of alerts) this.event('counter_metric', a);
     return alerts;
+  }
+
+  // ── Step8：MEMORY.md 自动分文件（超过 300 行时按日期切分）──
+  /**
+   * 检查并执行 MEMORY.md 分文件。
+   * 规则：总行数 > 300 → 将 100 天前创建的条目剪切到独立的 .md 文件中（命名 MEMORY.YYYY-MM-DD.md）。
+   * 返回分片信息，未触发则返回 null。
+   */
+  splitMemoryFile() {
+    const memFile = join(CONFIG.DATA_DIR, '..', '.monkeycode', 'MEMORY.md');
+    if (!existsSync(memFile)) return null;
+    const content = readFileSync(memFile, 'utf8');
+    const lines = content.split('\n');
+    if (lines.length <= 300) return null;
+
+    // 扫描所有 [User Instruction Summary] / [Project Knowledge Summary] 条目的 date 行，构建条目边界
+    const entries = [];
+    let currentEntry = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^\[User Instruction Summary\]$/i.test(line) || /^\[Project Knowledge Summary\]$/i.test(line)) {
+        if (currentEntry) entries.push(currentEntry);
+        currentEntry = { start: i, date: null };
+      } else if (currentEntry && /^-\s*Date:\s*/i.test(line)) {
+        const m = line.match(/\d{4}-\d{2}-\d{2}/);
+        currentEntry.date = m ? m[0] : null;
+      }
+    }
+    if (currentEntry) entries.push(currentEntry);
+
+    // 找出超过 100 天的旧条目
+    const cutoff = Date.now() - 100 * 86_400_000;
+    const oldEntries = entries.filter((e) => e.date && new Date(e.date).getTime() < cutoff);
+    if (!oldEntries.length) return null;
+
+    // 按日期分组
+    const byDate = new Map();
+    for (const e of oldEntries) {
+      let arr = byDate.get(e.date);
+      if (!arr) { arr = []; byDate.set(e.date, arr); }
+      arr.push(e);
+    }
+
+    // 从原文删除旧条目（从后往前删，避免索引偏移）
+    for (const e of [...entries].reverse()) {
+      const nextEnt = entries.find((x) => x.start > e.start);
+      const endLine = nextEnt ? nextEnt.start - 1 : lines.length - 1;
+      lines.splice(e.start, endLine - e.start + 1);
+    }
+    writeFileSync(memFile, lines.join('\n'), 'utf8');
+
+    // 写入分片文件
+    const splitCount = [];
+    for (const [date, ents] of byDate) {
+      const spl = join(CONFIG.DATA_DIR, '..', '.monkeycode', `MEMORY.${date}.md`);
+      const header = `# MEMORY Split — ${date}\n\n> 由 auto-control 自动分片生成，包含 ${ents.length} 条过期记忆/经验记录。\n`;
+      appendFileSync(spl, header, 'utf8');
+      for (const e of ents) {
+        const nextEnt = entries.find((x) => x.start > e.start);
+        const end = nextEnt ? nextEnt.start - 1 : lines.length;
+        appendFileSync(spl, lines.slice(e.start, end + 1).join('\n') + '\n\n', 'utf8');
+      }
+      splitCount.push({ date, count: ents.length });
+    }
+
+    this.event('memory_split', { total_lines: lines.length, splits: splitCount });
+    return { original_lines: lines.length, entries_moved: oldEntries.length, splits: splitCount };
   }
 }
 

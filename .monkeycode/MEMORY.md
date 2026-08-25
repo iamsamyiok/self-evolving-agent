@@ -182,3 +182,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - embed-backfill 启动改为 await backfillAll(store) + 2s 缓冲后再 loop.start()
   - graceful shutdown：SIGTERM/SIGINT → 中止 liveTasks → 等 5s → store.close() → process.exit(0)
   - 注入指纹从 17 增至 23（新增 code_inject/tool_inject/json_inject 三类）
+- Date: 2026-08-25
+- Context: Agent 完成 v1.5.0 发布（交互与工具完备轮：shell 默认开、edit_file、多模态图片、TUI 重构）
+- Category: Operations & Deployment
+- Instructions:
+  - gh 凭据过期时（401 Bad credentials）：`git credential fill` 可能返回缓存旧 token（仍 401）；必须直接调 helper `printf 'protocol=https\nhost=github.com\n\n' | /app/agent/bin/agent git-credential-helper get` 取新 token 再 `gh auth login --with-token`（登录身份 monkeycode-ai[bot]）
+  - 远程存在孤儿标签 v1.2.0/v1.3.0/v1.3.1/v1.4.0（旧版本方案遗留，无对应 GitHub Release）；唯一正式 Release 是 v1.1.0（稳定性加固轮 @ 4a55efd）。新发布须打 > v1.4.0 的标签（本次 v1.5.0），勿复用 v1.2.0
+  - 发布流程：git add+commit（消息尾 `Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com>` 会被钩子自动追加，-m 里手写会重复）→ git tag vX.Y.Z → git push origin master --tags → gh release create vX.Y.Z --title ... --notes ...
+- Date: 2026-08-25
+- Context: Agent 将项目打包发布为 npm 包 self-evolve@1.5.0
+- Category: Operations & Deployment
+- Instructions:
+  - npm 包：self-evolve（bin 命令同名，另保留 spa 旧入口）；npm 主页 https://www.npmjs.com/package/self-evolve
+  - 发布 403 "Two-factor authentication ... required"：账号开了强制 2FA，经典 token 被拒；须用 Granular Access Token（勾选 Bypass 2FA for automation + Read and write）。token 写 ~/.npmrc（600 权限）后 npm publish <pkg>.tgz --access public
+  - 安装模式数据隔离：仓库内无 config/local.json 时 IS_PACKAGED=true，数据/配置/沙箱落 ~/.self-evolve/（SPA_DATA_HOME 可重定向，测试用）；开发仓库行为不变
+  - 发布前必做：npm pack --dry-run 检查清单不含 data/、config/local.json、.monkeycode/；node --check 是 CJS 解析，bin 用 ESM 须 node 直接执行验证；干净 prefix 安装 + 起服务 + curl 200 全链路验证
+  - server.listen 的 EADDRINUSE 是异步 'error' 事件，try/catch 接不住——必须 promise 内 this.server.once('error', reject)（web.js listen 与 extend/monitor-view.js listen 均已修）

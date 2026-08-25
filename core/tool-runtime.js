@@ -69,11 +69,37 @@ function guardLookup(hostname, options, callback) {
   });
 }
 
-/** node:http(s) GET（手动重定向控制 + 同源 IP 校验 + 流式 64KB 截断） */
+/** node:http(s) GET（手动重定向控制 + 同源 IP 校验 + 流式 64KB 截断）
+ *  超时三层：socket idle（timeoutMs）+ 硬性总熔断（防 DNS 解析挂起不受 socket 计时）+ per-host 熔断（不可达站点快速失败） */
+const hostFail = new Map(); // host → { n, until } 网络层失败计数与冷却截止
+function noteHostResult(hostname, ok) {
+  const now = Date.now();
+  const rec = hostFail.get(hostname) ?? { n: 0, until: 0 };
+  if (ok) { if (rec.n) hostFail.delete(hostname); return; }
+  rec.n += 1;
+  if (rec.n >= 2) rec.until = now + 60_000; // 60s 内 ≥2 次网络层失败 → 熔断 1 分钟
+  hostFail.set(hostname, rec);
+}
+function hostBlocked(hostname) {
+  const rec = hostFail.get(hostname);
+  return rec && rec.until > Date.now();
+}
+
 function rawGet(url, timeoutMs) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    if (hostBlocked(u.hostname)) {
+      return reject(new Error(`站点近期不可达已熔断（${u.hostname}，60 秒内不再重试，可稍后再试）`));
+    }
     const fn = u.protocol === 'https:' ? httpsRequest : httpRequest;
+    let settled = false;
+    // 硬性总熔断：DNS 解析挂起/TCP 连接僵死不受 socket idle 计时，必须整体兜底
+    const kill = setTimeout(() => {
+      if (settled) return; settled = true;
+      noteHostResult(u.hostname, false);
+      req.destroy(new Error(`请求总超时（${timeoutMs + 2000}ms，含 DNS/连接阶段）`));
+      reject(new Error(`请求总超时（${timeoutMs + 2000}ms，含 DNS/连接阶段）`));
+    }, timeoutMs + 2000);
     const req = fn(url, {
       lookup: guardLookup,
       timeout: timeoutMs,
@@ -83,6 +109,7 @@ function rawGet(url, timeoutMs) {
         'Accept-Encoding': 'identity', // 免 gzip 解压（零依赖约束）
       },
     }, (res) => {
+      if (res.statusCode >= 200 && res.statusCode < 400) noteHostResult(u.hostname, true);
       const chunks = [];
       let size = 0;
       res.setEncoding('utf8');
@@ -91,11 +118,17 @@ function rawGet(url, timeoutMs) {
         if (size <= 65_536) chunks.push(c);
         else res.destroy(); // 超限即断流（已收集足够内容）
       });
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') }));
-      res.on('error', () => resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') })); // 截断断流按已收内容处理
+      res.on('end', () => { if (!settled) { settled = true; clearTimeout(kill); resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') }); } });
+      res.on('error', () => { if (!settled) { settled = true; clearTimeout(kill); resolve({ status: res.statusCode, headers: res.headers, text: chunks.join('') }); } }); // 截断断流按已收内容处理
     });
-    req.on('timeout', () => req.destroy(new Error(`请求超时（${timeoutMs}ms）`)));
-    req.on('error', reject);
+    req.on('timeout', () => { if (!settled) { settled = true; clearTimeout(kill); noteHostResult(u.hostname, false); req.destroy(new Error(`请求超时（${timeoutMs}ms）`)); } });
+    req.on('error', (e) => {
+      clearTimeout(kill);
+      if (settled) return; settled = true;
+      // 网络层错误（DNS/连接层）计入 per-host 熔断；HTTP 4xx/5xx 是服务端响应不算
+      if (/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/.test(String(e?.code ?? e?.message))) noteHostResult(u.hostname, false);
+      reject(e);
+    });
     req.end();
   });
 }

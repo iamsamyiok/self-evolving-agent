@@ -102,6 +102,7 @@ export class Store {
     this.migrateV2();
     this.migrateV3();
     this.migrateV4();
+    this.migrateV5();
   }
 
   /** v2：增量列（幂等，SQLite 无 IF NOT EXISTS 的 ADD COLUMN 用 pragma 守卫） */
@@ -154,6 +155,32 @@ export class Store {
       this.db.exec("ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'done'");
     }
     this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)').run(Date.now());
+  }
+
+  /** v5：tier 列扩充 + 存量默认值回填 */
+  migrateV5() {
+    const applied = this.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v ?? 1;
+    if (applied >= 5) return;
+    const cols = (table) => this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols('skills').includes('tier')) {
+      this.db.exec("ALTER TABLE skills ADD COLUMN tier TEXT NOT NULL DEFAULT 'warm'");
+      // 存量 ACTIVE 技能按 quality_score + success_rate 回填 tier
+      this.db.exec(`UPDATE skills SET tier='instant'
+        WHERE state='ACTIVE' AND quality_score>=0.8 AND execution_count>=5
+        AND (success_count+fail_count)>0 AND success_count*1.0/(success_count+fail_count)>=0.7`);
+      this.db.exec(`UPDATE skills SET tier='cool'
+        WHERE state='ACTIVE' AND quality_score<0.5 AND execution_count>=3
+        AND fail_count*1.0/execution_count>=0.5`);
+    }
+    if (!cols('experiences').includes('tier')) {
+      this.db.exec("ALTER TABLE experiences ADD COLUMN tier TEXT NOT NULL DEFAULT 'short'");
+      // 存量经验按 sample_count + quality_score 回填 tier
+      this.db.exec(`UPDATE experiences SET tier='long'
+        WHERE state='ACTIVE' AND sample_count>=3 AND quality_score>=0.7`);
+      this.db.exec(`UPDATE experiences SET tier='medium'
+        WHERE state='ACTIVE' AND sample_count>=2 AND quality_score>=0.6`);
+    }
+    this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)').run(Date.now());
   }
 
   /** 启动恢复：上次运行中未完成的任务标记为 interrupted（会话端如实展示，进化钩子不补跑） */

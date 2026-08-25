@@ -471,6 +471,13 @@ export class AgentExecutor {
       const errMsg = String(e?.message ?? e);
       if (/熔断|429|任务预算/.test(errMsg)) throw e; // infra 错误不降级，直接上抛
       progress?.({ stage: 'retry', goal: step.goal, error: errMsg.slice(0, 120) });
+      // 网络不可达/超时类失败：参数没错是网络不通，参数修复 LLM 往返救不了还烧限流配额——直接降级 reason
+      if (/超时|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|不可达已熔断|无可用解析记录/.test(errMsg)) {
+        const note = `工具 ${step.action} 网络不可达（${errMsg.slice(0, 80)}），改用自身知识完成本步骤目标`;
+        progress?.({ stage: 'degrade', goal: step.goal, to: 'reason', reason: '网络不可达' });
+        const output = await this.execStep({ goal: step.goal, action: 'reason' }, { ...ctx, degradeNote: note });
+        return { output, degraded: true, note };
+      }
       const fixed = await this.fixToolParams(step, errMsg, ctx);
       if (fixed) {
         const rc2 = checkStep(fixed, { toolRuntime: this.tools, config: CONFIG });
