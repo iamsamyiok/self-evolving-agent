@@ -53,13 +53,71 @@ self-evolve --port 8080 --no-open
 self-evolve --config
 ```
 
+其他安装方式：
+
+```bash
+# 免安装试用（一次性运行，npx 走缓存）
+npx self-evolve@latest spa demo
+
+# 固定版本（生产环境防意外升级）
+npm i -g self-evolve@1.5.13
+
+# 离线 / 内网安装：联网机取 tgz，传输后本地安装
+npm pack self-evolve
+npm i -g self-evolve-1.5.13.tgz
+```
+
+零依赖安装：包内无 node_modules、无原生编译，`npm i -g` 秒级完成；仅需 Node ≥ 22.13（node:sqlite、原生 fetch）。
+
+## 更新
+
+```bash
+# 方式一：内置自更新（查 registry → 自动 npm 安装 → 数据无损）
+spa update
+
+# 方式二：手动
+npm i -g self-evolve@latest
+
+# 国内镜像加速（registry 查询与更新走 npmmirror）
+SPA_NPM_REGISTRY=https://registry.npmmirror.com spa update
+
+# 查看版本与新版提示
+spa version
+```
+
+升级要点：
+
+- 数据与配置全在 `~/.self-evolve/`（可用 `SPA_DATA_HOME` 重定向），与安装目录分离——**跨版本升级不丢数据**，记忆/技能/经验/工作区文件全部保留
+- 升级前无需停止旧版本之外的操作；运行中的进程继续用旧代码，下次启动生效
+- `spa update` 失败（权限/网络）时打印手动命令与离线 tgz 路径
+- 版本锁定用户升级前先解绑：`npm i -g self-evolve@latest` 直接覆盖 pin
+
+## 卸载
+
+```bash
+# 卸载程序（两个 bin 入口一并移除）
+npm uninstall -g self-evolve
+
+# 可选：清理用户数据（记忆/技能/经验/工作区/配置，不可恢复）
+rm -rf ~/.self-evolve
+```
+
+说明：
+
+- `npm uninstall -g` 只删安装目录，`~/.self-evolve/` 数据目录保留——重装后历史记忆、技能、待办、交付物全部找回
+- 想彻底清除痕迹才需要第二步 `rm -rf ~/.self-evolve`（自定义过 `SPA_DATA_HOME` 的按该路径清理）
+- 源码运行（git clone）场景无全局安装，直接删仓库目录即可
+
 ## 使用
 
 ```bash
 self-evolve                # 网页对话模式（默认）
 spa                        # 终端 TUI 交互模式
 spa task "调研XX并写摘要"   # 单任务无头执行
+spa web                    # 启动网页对话（同 self-evolve）
 spa status                 # 查看系统状态
+spa version                # 查看版本与新版提示
+spa update                 # 自更新到最新版
 spa demo                   # 离线全流程演示
 ```
 
