@@ -340,3 +340,17 @@ Entries discovered by the Agent during task execution should follow this format:
   - 卸载方案只走文档指引（npm uninstall -g + rm -rf ~/.self-evolve），产品不做破坏性 uninstall 命令
   - gh/git 认证过期时先跑 printf 'protocol=https\nhost=github.com\naction=get\n' | /app/agent/bin/agent git-credential-helper get | grep password | cut -d= -f2 | gh auth login --with-token，随后 git push 直接用 credential-helper 即可恢复
   - 测试基线 223 绿
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.7.0 run_js 沙箱移除）
+- Context: 用户要求移除 run_js vm 沙箱——"打开网页"类任务无法执行（planner 曾编造 open_browser 伪动作自报 failed）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - run_js 现为受信全功能模式：ctx.require 白名单 = Node 内置模块（builtinModules 判断，node: 前缀均可），第三方包明确报错；fs/fetch/child_process 全开放
+  - vm.runInNewContext 仍用于执行（保留尾表达式语义），但 ctx 全功能——隔离已去除；process 是安全子集（无 exit/kill，防 LLM 代码误杀宿主进程）
+  - 可靠性护栏 ≠ 权限沙箱：Worker 硬终止（timeoutMs 参数 1-60s，默认 10s）+ resourceLimits 128MB 属资源护栏，保留
+  - tools/open_url.js 是动态热插拔工具：spawn 定值 opener（darwin:open / win32:cmd /c start / linux:xdg-open）+ 参数数组，无 shell 拼接无注入面；无桌面环境（ENOENT）返回诊断+替代方案不算失败
+  - planner 规则 12：打开网页/文件直接 tool:open_url，禁止编造 open_browser
+  - fs 路径囚禁 / http_get SSRF 白名单 / 红线宪法保留——这些与 run_js 受信化是不同层
+  - 实测对比：同任务改造前编造动作 failed，改造后 2.1s 一步 SUCCESS
+  - 测试基线 234 绿
