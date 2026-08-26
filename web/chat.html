@@ -64,6 +64,11 @@ header h1{font-size:15px;font-weight:600;flex:1;white-space:nowrap;overflow:hidd
 .ai-av{width:28px;height:28px;border-radius:50%;background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;margin-top:2px}
 .msg.ai .body{flex:1;min-width:0}
 .msg.ai .bub{font-size:15px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
+/* ── 长回答自动折叠（>10 行收起，可展开/收起） ── */
+.bub.clamped{max-height:18em;overflow:hidden;position:relative}
+.bub.clamped::after{content:'';position:absolute;left:0;right:0;bottom:0;height:3em;background:linear-gradient(transparent,var(--bg));pointer-events:none}
+.fold-btn{display:inline-block;margin:6px 0 2px;font-size:12px;color:var(--acc);background:var(--chip);border:1px solid var(--line);border-radius:12px;padding:2px 12px;cursor:pointer;user-select:none}
+.fold-btn:hover{background:var(--panel)}
 .msg.ai .bub code{background:var(--code);padding:1px 6px;border-radius:5px;font-family:Consolas,monospace;font-size:13px;color:#c7254e}
 .msg.ai .bub pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:12px;overflow-x:auto;margin:8px 0;white-space:pre;font-size:13px;color:#24292f}
 /* 执行过程卡片：可折叠实时动作区 */
@@ -509,8 +514,32 @@ function renderMsg(m){
     const d=document.createElement('div');d.className='msg ai';
     d.innerHTML=`<div class="ai-av">♻</div><div class="body">${aiHtml(m.meta?.thinkingHtml||m.meta?.thinking||'',m.content,m.meta)}</div>`;
     t.appendChild(d);
+    applyFold(d);
   }
   $('messages').scrollTop=$('messages').scrollHeight;
+}
+/* ── 长回答折叠：AI 气泡超过 10 行自动收起（渐变遮罩 + 展开按钮），点击切换 ── */
+const FOLD_LINES=10;
+function applyFold(msgEl){
+  const bub=msgEl?.querySelector?.('.bub');
+  if(!bub||bub.dataset.foldInited)return;
+  const cs=getComputedStyle(bub);
+  const lineH=parseFloat(cs.lineHeight)||27;
+  // 图片/表格等富内容占高更大，统一按像素高度折算行数
+  const lines=Math.round(bub.scrollHeight/lineH);
+  if(lines<=FOLD_LINES)return;
+  bub.dataset.foldInited='1';bub.dataset.foldLines=String(lines);
+  bub.classList.add('clamped');
+  const btn=document.createElement('span');
+  btn.className='fold-btn';
+  const setLabel=(folded)=>{btn.textContent=folded?`▽ 展开全文（约 ${lines} 行）`:'△ 收起';};
+  setLabel(true);
+  btn.onclick=()=>{
+    const folded=bub.classList.toggle('clamped');
+    setLabel(folded);
+    if(folded)bub.scrollIntoView({behavior:'smooth',block:'start'});
+  };
+  bub.after(btn);
 }
 function aiHtml(thinking,content,meta){
   const m=meta||{};
@@ -774,6 +803,7 @@ async function doSend(){
     // 流式 done 事件载荷是 message.content；轮询恢复载荷是 result.answer——两者都兼容
     const answer=q.answer??q.content;
     body.innerHTML=aiHtml(view.html(),answer||('（任务失败：'+(q.error||'未知')+'）'),{...meta,outcome:q.outcome,basis:q.basis,durationMs:q.durationMs});
+    applyFold(body.closest('.msg'));
     $('messages').scrollTop=$('messages').scrollHeight;
     refreshEvoPill();
   };

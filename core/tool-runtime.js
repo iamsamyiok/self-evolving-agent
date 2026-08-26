@@ -45,26 +45,29 @@ function isPrivateIp(ip) {
   return true;
 }
 
-/** SSRF 域名防线：解析全部 A/AAAA 记录逐个校验（拦数字 IP/十六进制/DNS 重绑定/映射地址） */
+/** SSRF 域名防线：SAFE_MODE=1 时解析全部 A/AAAA 记录逐个校验（拦数字 IP/十六进制/DNS 重绑定/映射地址）；
+ *  全权限模式（默认）放行内网/本机访问（agent 可操作本地服务） */
 async function assertPublicHost(hostname) {
+  if (!CONFIG.SAFE_MODE) return;
   let ips;
   try { ips = await lookupAll(hostname, { all: true }); } catch { throw new Error(`域名解析失败：${hostname}`); }
   for (const { address } of ips) {
-    if (isPrivateIp(address)) throw new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问`);
+    if (isPrivateIp(address)) throw new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问（SAFE_MODE）`);
   }
 }
 
 /** 校验型 lookup（TOCTOU 消除）：net/tls 建连时解析 → 校验 → 把同一结果交给连接使用。
  *  校验（assertPublicHost）与连接（本函数）各自解析的传统方案存在重绑定窗口：两次解析之间 DNS 可换 IP。
- *  这里连接直接消费校验过的地址，攻击窗口归零。注意 net 会以 {all:true} 调用并要求数组形式回调。 */
+ *  这里连接直接消费校验过的地址，攻击窗口归零。注意 net 会以 {all:true} 调用并要求数组形式回调。
+ *  SAFE_MODE=1 才启用私网拦截；默认全权限放行。 */
 function guardLookup(hostname, options, callback) {
   const wantAll = !!(options && options.all);
   lookupAll(hostname, { ...options, all: true }, (err, ips) => {
     if (err) return callback(err);
     const safe = [];
     for (const { address, family } of Array.isArray(ips) ? ips : []) {
-      if (isPrivateIp(address)) {
-        const e = new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问`);
+      if (CONFIG.SAFE_MODE && isPrivateIp(address)) {
+        const e = new Error(`R5: 域名 ${hostname} 解析到私网/保留地址 ${address}，禁止访问（SAFE_MODE）`);
         e.code = 'ERR_SSRF_BLOCKED';
         return callback(e);
       }
@@ -141,16 +144,18 @@ function rawGet(url, timeoutMs) {
   });
 }
 
-/** 路径囚禁：解析后必须落在 sandbox 根内（防 ../ 与绝对路径逃逸） */
+/** 路径解析：全权限模式（默认）全盘可读写——相对路径以工作区为基准、绝对路径直接放行；
+ *  SAFE_MODE=1 时恢复囚禁（解析后必须落在 workspace 根内，防 ../ 与绝对路径逃逸） */
 function confine(p, root) {
   const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
+  if (!CONFIG.SAFE_MODE) return { ok: true, abs };
   const rel = relative(resolve(root), abs);
   if (rel.startsWith('..') || isAbsolute(rel)) {
-    return { ok: false, reason: `路径越出沙箱根：${p}` };
+    return { ok: false, reason: `路径越出沙箱根（SAFE_MODE）：${p}` };
   }
   // Windows 绝对路径（如 C:/Windows/evil.txt）在 Linux 运行时也会绕过检查
   if (/^[A-Za-z]:[\\\/]/.test(p) || /^[A-Za-z]:\/[^/]/.test(p)) {
-    return { ok: false, reason: `路径越出沙箱根：${p}` };
+    return { ok: false, reason: `路径越出沙箱根（SAFE_MODE）：${p}` };
   }
   return { ok: true, abs };
 }
@@ -237,7 +242,7 @@ export class ToolRuntime {
     }
     // ── 低危：读 ──
     this.register({
-      name: 'fs_list', desc: '列出沙箱工作区内目录', risk: 'low', requiredParams: [],
+      name: 'fs_list', desc: '列目录（相对路径基于工作区，绝对路径全盘可读）', risk: 'low', requiredParams: [],
       checkPermissions: (p) => (p.dir == null ? { ok: true } : confine(p.dir, this.workspace)),
       run: async (p) => {
         const c = p.dir ? confine(p.dir, this.workspace) : { ok: true, abs: this.workspace };
@@ -246,7 +251,7 @@ export class ToolRuntime {
       },
     });
     this.register({
-      name: 'fs_read', desc: '读取沙箱工作区内文本文件（≤64KB）', risk: 'low', requiredParams: ['path'],
+      name: 'fs_read', desc: '读取文本文件（≤64KB；相对路径基于工作区，绝对路径全盘可读）', risk: 'low', requiredParams: ['path'],
       checkPermissions: (p) => confine(p.path, this.workspace),
       run: async (p) => {
         const c = confine(p.path, this.workspace);
@@ -262,7 +267,7 @@ export class ToolRuntime {
     });
     // ── 高危：写（需技能步骤声明 use_reason）──
     this.register({
-      name: 'fs_write', desc: '写沙箱工作区内文件（参数：path + content 完整内容 + use_reason 使用理由≥4字）——「写入/保存/生成文件」必须用本工具；content 可用 {{step:N}} 引用第 N 步产出、{{prev}} 上一步、{{steps_all}} 全部产出（规划时内容未知的场景禁止写自造占位符文字）', risk: 'high', requiredParams: ['path', 'content'],
+      name: 'fs_write', desc: '写文件（相对路径基于工作区，绝对路径全盘可写；参数：path + content 完整内容 + use_reason 使用理由≥4字）——「写入/保存/生成文件」必须用本工具；content 可用 {{step:N}} 引用第 N 步产出、{{prev}} 上一步、{{steps_all}} 全部产出（规划时内容未知的场景禁止写自造占位符文字）', risk: 'high', requiredParams: ['path', 'content'],
       checkPermissions: (p) => {
         const c = confine(p.path, this.workspace);
         if (!c.ok) return c;
@@ -290,7 +295,7 @@ export class ToolRuntime {
     });
     // ── 高危：编辑（字符串替换，需 use_reason）──
     this.register({
-      name: 'edit_file', desc: '编辑沙箱工作区内文件（通过字符串替换；参数：path, old_string, new_string, 可选 occurrences=1）', risk: 'high', requiredParams: ['path', 'old_string', 'new_string'],
+      name: 'edit_file', desc: '编辑文件（字符串替换；相对路径基于工作区，绝对路径全盘可写；参数：path, old_string, new_string, 可选 occurrences=1）', risk: 'high', requiredParams: ['path', 'old_string', 'new_string'],
       checkPermissions: (p) => {
         const c = confine(p.path, this.workspace);
         if (!c.ok) return c;
@@ -340,20 +345,20 @@ export class ToolRuntime {
     });
     // ── 高危：网络（域名白名单，R5）──
     this.register({
-      name: 'http_get', desc: 'GET 白名单域名 URL', risk: 'high', requiredParams: ['url'],
+      name: 'http_get', desc: 'GET 任意 URL（全权限模式可访问内网/本机服务；参数：{"url":"https://..."}；搜索请用 news_search）', risk: 'high', requiredParams: ['url'],
       checkPermissions: (p) => {
         // 容错：LLM 常给中文未编码 URL（如 bing.com/search?q=AI新闻）——自动 encodeURI 再校验
         if (p.url && /[^\x00-\x7F]/.test(p.url)) p.url = encodeURI(p.url);
         let u;
         try { u = new URL(p.url); } catch { return { ok: false, reason: '非法 URL（http_get 仅用于确切知道完整地址的公开 API；搜索请用 news_search）' }; }
         const host = u.hostname;
-        // 私网/回环拦截（防 SSRF 打内网，开放模式下仍保留）
-        if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?$)/.test(host) ||
-            /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
-          return { ok: false, reason: `R5: 禁止访问私网地址 ${host}` };
+        // 私网/回环拦截仅 SAFE_MODE 生效（全权限模式 agent 可访问本机/内网服务）
+        if (CONFIG.SAFE_MODE && (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?$)/.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host))) {
+          return { ok: false, reason: `R5: 禁止访问私网地址 ${host}（SAFE_MODE）` };
         }
-        // 开放模式：任意公网域名放行；否则走白名单
-        if (!CONFIG.TOOL_NET_OPEN) {
+        // SAFE_MODE 且未开开放网络时走白名单
+        if (CONFIG.SAFE_MODE && !CONFIG.TOOL_NET_OPEN) {
           const allowed = (CONFIG.TOOL_NET_WHITELIST ?? []).some((w) => host === w || host.endsWith('.' + w));
           if (!allowed) return { ok: false, reason: `R5: 域名 ${host} 不在白名单` };
         }
@@ -535,7 +540,7 @@ export class ToolRuntime {
     });
     // ── 特高危：命令行（默认总开关关闭）──
     this.register({
-      name: 'shell', desc: '受限子进程执行（默认禁用）', risk: 'critical',
+      name: 'shell', desc: '执行系统命令（参数：cmd；15s 超时，输出截断；优先 run_js/news_search，系统级操作才用本工具）', risk: 'critical',
       checkPermissions: (p) => {
         if (!CONFIG.TOOL_SHELL_ENABLED) return { ok: false, reason: 'R2: shell 工具默认禁用（TOOL_SHELL_ENABLED=0）' };
         if (!p.use_reason || String(p.use_reason).length < 8) return { ok: false, reason: '须携带详细使用理由' };

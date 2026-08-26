@@ -1,7 +1,7 @@
-// tests/purification/sandbox.test.js —— 工具沙箱逃逸测试（§11.3 DoD：沙箱逃逸测试通过）
+// tests/purification/sandbox.test.js —— 权限体系测试（§11.3 DoD）：SAFE_MODE 囚禁 + 全权限放行双模式
 import test from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,10 +18,25 @@ test.before(async () => {
   tools = new ToolRuntime(null, { workspace: join(dir, 'ws') });
 });
 
-test('路径逃逸：../ 与绝对路径一律拒绝', async () => {
-  await assert.rejects(() => tools.call('fs_write', { path: '../escape.txt', content: 'x', use_reason: '测试越界' }), /越出沙箱根/);
-  await assert.rejects(() => tools.call('fs_write', { path: 'C:/Windows/evil.txt', content: 'x', use_reason: '测试越界' }, ), /越出沙箱根/);
-  await assert.rejects(() => tools.call('fs_read', { path: '../../etc/passwd' }), /越出沙箱根/);
+test('SAFE_MODE：路径逃逸 ../ 与绝对路径拒绝', async () => {
+  const saved = CONFIG.SAFE_MODE;
+  CONFIG.SAFE_MODE = true;
+  try {
+    await assert.rejects(() => tools.call('fs_write', { path: '../escape.txt', content: 'x', use_reason: '测试越界' }), /越出沙箱根/);
+    await assert.rejects(() => tools.call('fs_write', { path: 'C:/Windows/evil.txt', content: 'x', use_reason: '测试越界' }), /越出沙箱根/);
+    await assert.rejects(() => tools.call('fs_read', { path: '../../etc/passwd' }), /越出沙箱根/);
+  } finally { CONFIG.SAFE_MODE = saved; }
+});
+
+test('全权限模式（默认）：绝对路径与 ../ 全盘放行', async () => {
+  const saved = CONFIG.SAFE_MODE;
+  CONFIG.SAFE_MODE = false;
+  try {
+    const r = await tools.call('fs_write', { path: join(dir, 'outside.txt'), content: 'full-access', use_reason: '全权限模式写入工作区外' });
+    assert.equal(r.ok, true);
+    assert.equal(existsSync(join(dir, 'outside.txt')), true);
+    rmSync(join(dir, 'outside.txt'), { force: true });
+  } finally { CONFIG.SAFE_MODE = saved; }
 });
 
 test('高危写：无理由拒绝；凭据内容拒绝', async () => {
@@ -31,14 +46,15 @@ test('高危写：无理由拒绝；凭据内容拒绝', async () => {
   assert.equal(r.ok, true);
 });
 
-test('网络白名单：非白名单域名拒绝（R5）', async () => {
-  // 开发环境常设 TOOL_NET_OPEN=1（任意公网放行）；本用例固定走白名单模式再恢复
-  const saved = CONFIG.TOOL_NET_OPEN;
+test('SAFE_MODE：非白名单域名拒绝（R5）', async () => {
+  // 开发环境常设 TOOL_NET_OPEN=1（任意公网放行）；本用例固定走安全模式白名单再恢复
+  const savedSafe = CONFIG.SAFE_MODE, savedOpen = CONFIG.TOOL_NET_OPEN;
+  CONFIG.SAFE_MODE = true;
   CONFIG.TOOL_NET_OPEN = false;
   try {
-    await assert.rejects(() => tools.call('http_get', { url: 'https://evil.example.com/x' }), /R5.*白名单/);
+    await assert.rejects(() => tools.call('http_get', { url: 'https://evil.example.com/x' }), /R5.*白名单|私网/);
     await assert.rejects(() => tools.call('http_get', { url: 'https://api.deepseek.com/v1?token=sk-abcdef0123456789abcdef' }), /R4/);
-  } finally { CONFIG.TOOL_NET_OPEN = saved; }
+  } finally { CONFIG.SAFE_MODE = savedSafe; CONFIG.TOOL_NET_OPEN = savedOpen; }
 });
 
 test('shell 工具：总开关关闭时默认禁用；开启后破坏性命令模式拒绝', async () => {
@@ -58,7 +74,13 @@ test('R4：读取含凭据的文件拒绝外传', async () => {
 });
 
 test('步骤级红线检查：tool 步骤经权限校验，凭据内容拦截', async () => {
-  const bad1 = checkStep({ goal: 'x', action: 'tool:fs_write', params: { path: '../x', content: 'a', use_reason: '越界' } }, { toolRuntime: tools, config: CONFIG });
+  // 路径囚禁断言在 SAFE_MODE 下成立（全权限模式 confine 放行，属设计内）
+  const saved = CONFIG.SAFE_MODE;
+  CONFIG.SAFE_MODE = true;
+  let bad1;
+  try {
+    bad1 = checkStep({ goal: 'x', action: 'tool:fs_write', params: { path: '../x', content: 'a', use_reason: '越界' } }, { toolRuntime: tools, config: CONFIG });
+  } finally { CONFIG.SAFE_MODE = saved; }
   assert.equal(bad1.ok, false);
   const bad2 = checkStep({ goal: '外发', action: 'reason' }, { toolRuntime: tools, config: CONFIG });
   assert.equal(bad2.ok, true);

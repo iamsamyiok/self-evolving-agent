@@ -104,11 +104,14 @@ export const CONFIG = {
   // ── 回归门禁（§10.1）──
   GOLDEN_REGRESSION_PP: 2,        // 成功率回归 ≤2pp 才可生效
 
-  // ── 工具沙箱（§8.2/§9.2）──
+  // ── 工具权限（§8.2/§9.2）──
   TOOLS_ENABLED: (env.SPA_TOOLS ?? local.TOOLS_ENABLED ?? '1') === '1',
   TOOL_WORKSPACE: env.SPA_TOOL_WORKSPACE ?? local.TOOL_WORKSPACE ?? (IS_PACKAGED ? join(DATA_HOME, 'workspace') : join(ROOT, 'data', 'workspace')),
   TOOL_TIMEOUT_MS: 15_000,
   TOOL_SHELL_ENABLED: (env.SPA_TOOL_SHELL ?? local.TOOL_SHELL_ENABLED ?? '1') === '1', // 默认启用命令行工具
+  // 全权限模式（默认开）：文件工具全盘可读写（相对路径仍以工作区为基准）、http_get 可访问内网、shell 可用——
+  // 置 SPA_SAFE_MODE=1 恢复安全模式：路径囚禁工作区 + 私网拦截 + 上述限制
+  SAFE_MODE: (env.SPA_SAFE_MODE ?? local.SAFE_MODE ?? '0') === '1',
   TOOL_NET_WHITELIST: (local.TOOL_NET_WHITELIST ?? ['api.deepseek.com', 'api.agnes-ai.cn', 'api.anysearch.com', 'news.google.com']),
   // 开放网络模式（默认开）：http_get 不再受白名单限制，可访问任意公网站点（仍拦私网 SSRF 与凭据外传）
   TOOL_NET_OPEN: (env.SPA_TOOL_NET_OPEN ?? local.TOOL_NET_OPEN ?? '1') === '1',
