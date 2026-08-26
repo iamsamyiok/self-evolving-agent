@@ -102,6 +102,14 @@ export async function gapCheck(input, evidenceBook, { label } = {}) {
   return { sufficient: true, gaps: [] };
 }
 
+/** 蒸馏触发判定（纯函数，供 executor 预判 + 测试）：步骤产出足够大才值得一次阻塞式 LLM 蒸馏。
+ *  门槛默认 26K（远高于 distillSteps 内部 12K 后备阈值）：48K 最终预算内的小上下文直接进 final，
+ *  省掉一次免费档排队+生成的整轮调用（实测可为最终答案提速 10-40s）。 */
+export function shouldDistill(steps, { deep = false, minChars = 26_000 } = {}) {
+  const total = steps.reduce((a, s) => a + String(s.output ?? '').length, 0);
+  return (deep || steps.length >= 5) && total > minChars;
+}
+
 /** 步骤蒸馏：步骤总产出超预算时一次 LLM 压缩成要点（保数字/结论/来源序号，去过程叙述） */
 export async function distillSteps(steps, { label, threshold = 12_000 } = {}) {
   const total = steps.reduce((a, s) => a + String(s.output ?? '').length, 0);

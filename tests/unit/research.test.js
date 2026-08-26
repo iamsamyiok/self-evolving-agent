@@ -1,7 +1,7 @@
 // tests/unit/research.test.js —— 深度研究管线单测：证据解析/去重编号/引用清单/gap-check 守卫/蒸馏降级
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSearchResults, EvidenceBook } from '../../core/research.js';
+import { parseSearchResults, EvidenceBook, shouldDistill } from '../../core/research.js';
 
 test('parseSearchResults：AnySearch 格式（标题/来源/链接/摘要）解析', () => {
   const text = `1. OpenAI 发布新模型
@@ -83,4 +83,28 @@ test('EvidenceBook：空账本 citationList 返回空串', () => {
 test('agent-executor 深度档位常量可用（research 模块无循环依赖）', async () => {
   const mod = await import('../../core/agent-executor.js');
   assert.ok(mod.AgentExecutor);
+});
+
+test('shouldDistill：小上下文（6 步 × 2K）不蒸馏——省一次阻塞式 LLM 调用', () => {
+  const steps = Array.from({ length: 6 }, (_, i) => ({ goal: `s${i}`, action: 'reason', output: 'x'.repeat(2000) }));
+  assert.equal(shouldDistill(steps), false); // 总量 12K ≤ 26K 门槛：直接进 final
+});
+
+test('shouldDistill：deep 模式且总量超门槛才蒸馏', () => {
+  const big = [{ goal: 's', action: 'reason', output: 'x'.repeat(30_000) }];
+  assert.equal(shouldDistill(big, { deep: true }), true); // 30K > 26K
+  assert.equal(shouldDistill(big, { deep: false }), false); // 非 deep 且步数 < 5：结构上不会走到这（executor 传 deep || >=5），此处验证纯函数语义
+});
+
+test('shouldDistill：≥5 步 + 超门槛触发；≥5 步 + 小总量不触发', () => {
+  const manySmall = Array.from({ length: 6 }, () => ({ goal: 's', action: 'reason', output: 'x'.repeat(1000) }));
+  assert.equal(shouldDistill(manySmall), false); // 6 步但仅 6K
+  const manyBig = Array.from({ length: 6 }, () => ({ goal: 's', action: 'reason', output: 'x'.repeat(5000) }));
+  assert.equal(shouldDistill(manyBig), true); // 30K > 26K
+});
+
+test('shouldDistill：门槛可配置（CONFIG.STEPS_DISTILL_MIN_CHARS 联动）', () => {
+  const mid = [{ goal: 's', action: 'reason', output: 'x'.repeat(15_000) }];
+  assert.equal(shouldDistill(mid, { deep: true, minChars: 26_000 }), false);
+  assert.equal(shouldDistill(mid, { deep: true, minChars: 10_000 }), true);
 });

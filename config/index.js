@@ -125,6 +125,7 @@ export const CONFIG = {
   PLAN_MAX_STEPS: 8, // 复杂任务允许更深分解（规划器输出截断上限）
   REPLAN_MAX: 2, // 执行失败后的重新规划次数（每次前置预算守卫，耗尽自动停）
   STEP_RETRY_MAX: 3,
+  STEPS_DISTILL_MIN_CHARS: Number(env.SPA_STEPS_DISTILL_MIN_CHARS ?? local.STEPS_DISTILL_MIN_CHARS ?? 26_000), // 最终综合前 LLM 蒸馏的最小步骤产出量（低于此直接进 final，省一次阻塞调用；48K 预算内小上下文无需蒸馏）
 
   // ── 黄金集冷启动 ──
   GOLDEN_AUTO_MAX: 50,
