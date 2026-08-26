@@ -52,3 +52,25 @@ test('无 {{ 的字符串零开销直通（同一引用不变）', () => {
   const p = expandStepRefs(src, steps);
   assert.equal(p.content, '普通文本');
 });
+
+test('{{steps_synthesis}} 排除 news_search/http_get 原始检索噪声，只收分析类步骤', () => {
+  const mixed = [
+    { goal: '搜索新闻', action: 'tool:news_search', output: '新闻列表原文……', full: '新闻列表原文……' },
+    { goal: '抓取汇率', action: 'tool:http_get', output: '{"USD":7.1}', full: '{"USD":7.1}' },
+    { goal: '计算收入', action: 'tool:run_js', output: '月收入 152000', full: '月收入 152000' },
+    { goal: '综合分析', action: 'reason', output: '分析结论', full: '分析结论' },
+  ];
+  const p = expandStepRefs({ content: '{{steps_synthesis}}' }, mixed);
+  assert.doesNotMatch(p.content, /新闻列表原文/);
+  assert.doesNotMatch(p.content, /USD/);
+  assert.match(p.content, /月收入 152000/);
+  assert.match(p.content, /分析结论/);
+});
+
+test('{{steps_synthesis}} 全部为检索步骤时回退为全量（避免空引用）', () => {
+  const onlySearch = [
+    { goal: '搜索', action: 'tool:news_search', output: '新闻A', full: '新闻A' },
+  ];
+  const p = expandStepRefs({ content: '{{steps_synthesis}}' }, onlySearch);
+  assert.match(p.content, /新闻A/);
+});

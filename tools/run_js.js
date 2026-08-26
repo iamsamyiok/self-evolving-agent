@@ -95,6 +95,12 @@ export default {
       if (m.logs?.length) parts.push(`输出：\n${m.logs.join('\n').slice(0, 2000)}`);
       if (m.result !== undefined) parts.push(`返回值：${String(m.result).slice(0, 1000)}`);
       if (m.err) parts.push(`错误：${String(m.err).slice(0, 300)}`);
+      // 数值健全性哨兵：输出全为 null/NaN 数值通常意味着计算 bug（JSON.stringify 把 NaN 写成 null），
+      // 提示重试链修正代码而非把 null 当有效结果写进交付物
+      const text = parts.join('\n');
+      if (/\"monthly|\"total|\"revenue|\"sum|\"avg|\"count/.test(text) && /:\s*(null|NaN)\b/.test(text) && !m.err) {
+        parts.push('⚠ 数值健全性警告：输出中的数值字段为 null/NaN——常见原因是算式对缺失字段做算术（undefined*5=NaN，JSON.stringify 序列化为 null）。请检查字段名拼写与条件分支（如 p.seats?p.users:… 的判断字段可能不存在）');
+      }
       finish(parts.join('\n') || '(无输出，代码执行完毕)');
     });
     w.on('error', (e) => finish(`错误：${String(e?.message ?? e).slice(0, 300)}`));

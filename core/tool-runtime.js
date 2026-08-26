@@ -187,6 +187,11 @@ export class ToolRuntime {
         return { ...p, dir: p.dir ?? p.path ?? p.directory ?? '.' };
       case 'http_get':
         return { ...p, url: p.url ?? p.link ?? p.address };
+      case 'verify':
+        // planner 常写 path/file 指断言对象——归一到 file（tools-verify 只认 file/text/base64）
+        return { ...p, file: p.file ?? p.path ?? p.filename };
+      case 'todo':
+        return { ...p, text: p.text ?? p.task ?? p.title ?? p.content ?? p.item };
       default:
         return p;
     }
@@ -273,6 +278,13 @@ export class ToolRuntime {
         if (!c.ok) throw new Error(c.reason);
         mkdirSync(dirname(c.abs), { recursive: true });
         writeFileSync(c.abs, p.content, 'utf8');
+        // .json 交付物前置校验：写盘成功但格式非法会污染下游（verify json_valid / query 解析全崩）
+        if (c.abs.endsWith('.json') && p.content.trim()) {
+          try { JSON.parse(p.content); }
+          catch (e) {
+            return `已写入 ${p.path}（${p.content.length} 字符），但 ⚠ JSON 格式非法（${String(e.message).slice(0, 80)}）——若本文件是最终交付物请修正后重写，否则后续 json_valid/query 断言会失败`;
+          }
+        }
         return `已写入 ${p.path}（${p.content.length} 字符）`;
       },
     });
