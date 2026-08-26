@@ -230,6 +230,18 @@ Entries discovered by the Agent during task execution should follow this format:
   - 测试套件：`node --test tests/unit/*.test.js`，当前 68 项全绿（42 原有 + 26 新）
 
 [Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.8 来源链接直达）
+- Context: 用户要求所有"来源"必须有可点击链接直达原始信息源
+- Category: Build Methods
+- Instructions:
+  - chat.html md() 渲染顺序（改渲染必读）：esc → 占位符暂存（图片 markdown → [文本](URL) 链接 → 代码块 → 行内代码，stash 返回 \u0000N\u0000）→ autolink 裸 URL（字符类排除 \u0000<>"' 防撞占位符与标签属性）→ bold/heading/列表 → 占位符换回 → 换行转 br。HTML 块必须先 stash 再 autolink，否则 img src / a href 里的 URL 会被二次包裹
+  - esc 后 URL 中 & 变 &amp;——放 href 是合法写法（浏览器解析回 &），无需反转义
+  - md() 测试手法（tests/unit/md-autolink.test.js）：从 chat.html 正则切出 esc 一行 + md 函数体，new Function 注入执行真实调用链；改 md() 后必须跑此测试 + exec-view.test.js
+  - subagent 结论来源：runOne 用 research.js 的 parseSearchResults 解析 news_search 输出取前 2 条带 URL 条目，拼 `来源：标题 URL` 附结论尾（结论本体仍 ≤300 字不含 URL）
+  - 深研链路的来源链接（来源卡片 <a href>、导出报告 URL 行）v1.5.3 起已有，本轮未动
+  - gh CLI 的 token 会过期（401 Bad credentials）：先 helper 取新 token `printf 'protocol=https\nhost=github.com\naction=get\n' | /app/agent/bin/agent git-credential-helper get`，管道 `gh auth login --with-token` 后 push/release 即恢复
+
+[Project Knowledge Summary]
 - Date: 2026-08-26（v1.5.7 审查修复轮）
 - Context: 对 v1.5.6 八工具做代码审查，修复 6 处实际缺陷 + 沙箱测试隔离问题
 - Category: Troubleshooting & Debugging
