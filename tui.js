@@ -200,10 +200,32 @@ async function handle(line) {
       }
       break;
     }
-    case 'skills': 
+    case 'skills': {
+      if (rest[0] === 'install') {
+        // C2：skill install owner/repo[/dir] —— Agent Skills 标准一键安装
+        const src = rest.slice(1).join('/');
+        if (!src) { console.log(color('yellow', '用法：skills install owner/repo[/子目录]')); break; }
+        console.log(bold(`正在从 GitHub 安装技能：${src}`));
+        try {
+          const { installFromGitHub } = await import('./core/fs-skills.js');
+          console.log(color('green', '✓ ' + (await installFromGitHub(src))));
+        } catch (e) {
+          console.log(color('red', '✗ 安装失败: ') + e.message);
+        }
+        break;
+      }
       console.log(bold('技能列表'));
-      store.list('skill').slice(0, 30).forEach((r) => console.log(brief(r, 'skill'))); 
+      store.list('skill').slice(0, 30).forEach((r) => console.log(brief(r, 'skill')));
+      try {
+        const { listFsSkills } = await import('./core/fs-skills.js');
+        const fs = listFsSkills();
+        if (fs.length) {
+          console.log(bold('文件系统技能（Agent Skills 标准）'));
+          fs.forEach((s) => console.log(`  ${s.name}  ${dim(s.desc.slice(0, 60))}`));
+        }
+      } catch { /* 扫描失败不阻塞列表 */ }
       break;
+    }
     case 'memories': 
       console.log(bold('记忆列表'));
       store.list('memory').slice(0, 30).forEach((r) => console.log(brief(r, 'memory'))); 

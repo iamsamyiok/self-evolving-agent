@@ -398,6 +398,23 @@ function mockChat({ messages }) {
   const pick = (arr) => arr[h % arr.length];
 
   // 进化钩子：记忆抽取 / 复盘 / 技能提炼 / 记忆合并 / 技能修复 / Prompt 迭代（保证 MOCK 模式下进化→净化闭环可演示）
+  if (text.includes('调研子代理')) {
+    // 子调研（D2）：检索材料有无两态——有材料给结论，无材料给未核实声明（可测降级路径）
+    const topic = text.match(/子课题：(.+)/)?.[1]?.slice(0, 60) ?? '课题';
+    const noMat = text.includes('（检索不可用）');
+    return { text: noMat ? `以下内容未经联网核实，基于模型训练数据，可能过时。「${topic}」的要点概述（MOCK）。` : `「${topic}」结论：基于检索材料的 MOCK 综合要点。`, usage: { prompt_tokens: 110, completion_tokens: 45 } };
+  }
+  if (text.includes('需求分析器')) {
+    // 意图契约（B1）：从任务原文抽取提及的文件路径作交付物（可测硬断言路径）
+    const task = text.match(/任务原文：\n(.+)/s)?.[1]?.slice(0, 200) ?? '任务';
+    const paths = [...task.matchAll(/([\w./-]+\.(?:md|json|txt|csv))/g)].map((m) => m[1]).slice(0, 4);
+    return { text: JSON.stringify({ task: task.slice(0, 60), goals: [], deliverables: paths.map((p) => ({ path: p, criterion: '文件存在' })), constraints: [], acceptance: paths.map((p) => `已产出 ${p}`) }), usage: { prompt_tokens: 100, completion_tokens: 50 } };
+  }
+  if (text.includes('交付核验裁判')) {
+    // 默认 PASS（judge 垃圾输出按通过处理）；任务含 GAPS 标记时返回缺口（测返修路径）
+    const gaps = text.includes('INTENT_TEST_GAPS');
+    return { text: JSON.stringify(gaps ? { verdict: 'GAPS', gaps: ['要求的交付物 report.md 未落实'] } : { verdict: 'PASS', gaps: [] }), usage: { prompt_tokens: 80, completion_tokens: 20 } };
+  }
   if (text.includes('记忆抽取器')) {
     const task = text.match(/任务：(.+)/)?.[1]?.slice(0, 60) ?? '任务';
     return { text: JSON.stringify({ memories: [{ content: `关于「${task}」的可复用要点`, kind: 'semantic', importance: 0.6 }] }), usage: { prompt_tokens: 90, completion_tokens: 40 } };

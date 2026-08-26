@@ -118,6 +118,27 @@ export async function distillSteps(steps, { label, threshold = 12_000 } = {}) {
   return { distilled: true, steps: out.steps.map((s, i) => ({ goal: s.goal ?? steps[i]?.goal ?? `步骤${i + 1}`, action: s.action ?? steps[i]?.action ?? 'reason', output: String(s.output ?? '').slice(0, 600) })) };
 }
 
+/** 零 LLM 预算压缩（D1，吸收 dual-agent 上下文预算管理）：蒸馏跳过/失败时的确定性兜底。
+ *  策略：总量超预算 → 从最旧步骤开始折叠为 头300+尾100+折叠标记；最近 3 步保持全文；
+ *  含框架判定标记（PASS/FAIL/写入/已创建）的结果不压缩（执行依据不可丢）。
+ *  返回 { compressed, steps }——未超预算原样返回 */
+export function compressStepsForBudget(steps, budgetChars = 48_000) {
+  const total = steps.reduce((a, s) => a + String(s.output ?? '').length, 0);
+  if (total <= budgetChars) return { compressed: false, steps };
+  const keepFull = new Set(steps.slice(-3).map((_, i) => steps.length - 3 + i)); // 最近 3 步全文
+  steps.forEach((s, i) => {
+    if (/PASS|FAIL|写入成功|已创建|已更新|已写入|断言/.test(String(s.output ?? ''))) keepFull.add(i);
+  });
+  const out = steps.map((s, i) => {
+    const text = String(s.output ?? '');
+    if (keepFull.has(i) || text.length <= 500) return s;
+    const head = text.slice(0, 300);
+    const tail = text.slice(-100);
+    return { ...s, output: `${head}\n…［上下文预算：此步骤产出已折叠 ${text.length - 400} 字符］…\n${tail}` };
+  });
+  return { compressed: true, steps: out };
+}
+
 /** 搜索文本 → 注入防御包装（复用 inject-guard；缺口补搜与预检索共用） */
 export function wrapSearchText(title, text) {
   const scan = scanExternalContent(text);

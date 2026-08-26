@@ -224,7 +224,7 @@ export class ToolRuntime {
     }
     // ── 低危：读 ──
     this.register({
-      name: 'fs_list', desc: '列出沙箱工作区内目录', risk: 'low',
+      name: 'fs_list', desc: '列出沙箱工作区内目录', risk: 'low', requiredParams: [],
       checkPermissions: (p) => (p.dir == null ? { ok: true } : confine(p.dir, this.workspace)),
       run: async (p) => {
         const c = p.dir ? confine(p.dir, this.workspace) : { ok: true, abs: this.workspace };
@@ -233,7 +233,7 @@ export class ToolRuntime {
       },
     });
     this.register({
-      name: 'fs_read', desc: '读取沙箱工作区内文本文件（≤64KB）', risk: 'low',
+      name: 'fs_read', desc: '读取沙箱工作区内文本文件（≤64KB）', risk: 'low', requiredParams: ['path'],
       checkPermissions: (p) => confine(p.path, this.workspace),
       run: async (p) => {
         const c = confine(p.path, this.workspace);
@@ -249,7 +249,7 @@ export class ToolRuntime {
     });
     // ── 高危：写（需技能步骤声明 use_reason）──
     this.register({
-      name: 'fs_write', desc: '写沙箱工作区内文件', risk: 'high',
+      name: 'fs_write', desc: '写沙箱工作区内文件', risk: 'high', requiredParams: ['path', 'content'],
       checkPermissions: (p) => {
         const c = confine(p.path, this.workspace);
         if (!c.ok) return c;
@@ -270,7 +270,7 @@ export class ToolRuntime {
     });
     // ── 高危：编辑（字符串替换，需 use_reason）──
     this.register({
-      name: 'edit_file', desc: '编辑沙箱工作区内文件（通过字符串替换；参数：path, old_string, new_string, 可选 occurrences=1）', risk: 'high',
+      name: 'edit_file', desc: '编辑沙箱工作区内文件（通过字符串替换；参数：path, old_string, new_string, 可选 occurrences=1）', risk: 'high', requiredParams: ['path', 'old_string', 'new_string'],
       checkPermissions: (p) => {
         const c = confine(p.path, this.workspace);
         if (!c.ok) return c;
@@ -320,7 +320,7 @@ export class ToolRuntime {
     });
     // ── 高危：网络（域名白名单，R5）──
     this.register({
-      name: 'http_get', desc: 'GET 白名单域名 URL', risk: 'high',
+      name: 'http_get', desc: 'GET 白名单域名 URL', risk: 'high', requiredParams: ['url'],
       checkPermissions: (p) => {
         // 容错：LLM 常给中文未编码 URL（如 bing.com/search?q=AI新闻）——自动 encodeURI 再校验
         if (p.url && /[^\x00-\x7F]/.test(p.url)) p.url = encodeURI(p.url);
@@ -392,8 +392,7 @@ export class ToolRuntime {
     });
     // ── 新闻搜索：AnySearch API（免费层 + API Key 可选）──
     this.register({
-      name: 'news_search', desc: '搜索新闻/实时信息/时事热点（参数：query 关键词, maxResults 条数）——一切需要最新信息的任务首选此工具', risk: 'medium',
-      checkPermissions: (p) => {
+      name: 'news_search', desc: '搜索新闻/实时信息/时事热点（参数：query 关键词, maxResults 条数）——一切需要最新信息的任务首选此工具', risk: 'medium', requiredParams: ['query'],      checkPermissions: (p) => {
         const hasQuery = p.query || p.topic || p.search || p.q || p.keyword;
         if (!hasQuery) return { ok: false, reason: 'query/topic/keyword 必填' };
         return { ok: true };
@@ -468,6 +467,12 @@ export class ToolRuntime {
         } finally { clearTimeout(timer); }
       },
     });
+    // ── 并行子调研代理（D2）：多子课题并行"搜索→综合"，只回传结论（过程不进主上下文） ──
+    this.register({
+      name: 'subagent', desc: '并行子调研（参数：topics 子课题数组或顿号/逗号分隔，≤3 个）：各自搜索并综合，返回各课题结论——适合"分别调研 A、B、C"类任务', risk: 'medium', requiredParams: ['topics'],
+      checkPermissions: () => (this.subagentRunner ? { ok: true } : { ok: false, reason: '子调研代理未注入（executor 初始化后可用）' }),
+      run: async (p) => this.subagentRunner(p),
+    });
     // ── 特高危：命令行（默认总开关关闭）──
     this.register({
       name: 'shell', desc: '受限子进程执行（默认禁用）', risk: 'critical',
@@ -490,7 +495,19 @@ export class ToolRuntime {
     });
   }
 
-  /** 统一执行入口：别名解析 → 权限检查（参数归一化后）→ 执行 → 记录调用证据（成败/耗时，喂技能评分） */
+  /** 统一执行入口：别名解析 → 权限检查（参数归一化后）→ 执行 → 记录调用证据（成败/耗时，喂技能评分）
+   *  三重防护（吸收 dual-agent 插件运行时）：① 必填参数执行前校验（缺参返回可重试错误，LLM 看到 schema 自纠）
+   *  ② 执行超时兜底（防业务工具挂起卡死任务，SPA_TOOL_TIMEOUT_MS 可调）③ 输出截断 8k（防超长结果撑爆上下文） */
+  static TIMEOUT_MS = Number(process.env.SPA_TOOL_TIMEOUT_MS ?? 60_000);
+  static OUTPUT_CAP = 8192;
+
+  _checkRequired(tool, params) {
+    const req = Array.isArray(tool?.requiredParams) ? tool.requiredParams : [];
+    const missing = req.filter((k) => params[k] === undefined || params[k] === null || (typeof params[k] === 'string' && !params[k].trim()));
+    if (!missing.length) return '';
+    return `工具 ${tool.name} 调用缺少必填参数：${missing.join('、')}。请按工具参数说明重新调用并提供完整参数；若确认上轮已提供，说明参数在传输中丢失，请重试。`;
+  }
+
   async call(name, params, { taskId } = {}) {
     const resolved = this.resolve(name);
     if (!resolved) {
@@ -501,6 +518,12 @@ export class ToolRuntime {
     }
     const tool = this.tools.get(resolved) ?? { name: resolved, desc: '技能调用', risk: 'medium', checkPermissions: () => ({ ok: true }) };
     const norm = ToolRuntime.normalizeParams(resolved, params ?? {});
+    const missErr = this._checkRequired(tool, norm);
+    if (missErr) {
+      const err = new Error(missErr);
+      err.blocked = true;
+      throw err;
+    }
     const perm = tool.checkPermissions?.(norm) ?? { ok: true };
     if (!perm.ok) {
       const err = new Error(perm.reason);
@@ -509,10 +532,30 @@ export class ToolRuntime {
     }
     const start = Date.now();
     try {
-      const output = resolved.startsWith('skill:')
-        ? await this._runSkillTool(resolved, norm)
-        : await tool.run(norm);
-      return { ok: true, output, durationMs: Date.now() - start };
+      // 锻造区热重载：mtime 变更的工具先重新注册（失败保留旧版本继续执行）
+      if (this._forgeReloader) {
+        try { await this._forgeReloader(this, resolved); } catch { /* 重载失败不阻塞执行 */ }
+      }
+      const runP = resolved.startsWith('skill:')
+        ? this._runSkillTool(resolved, norm)
+        : Promise.resolve(tool.run(norm));
+      let timer = null;
+      // 超时兜底：业务工具挂起不再卡死任务（内建工具自身有更细粒度超时，此处为外层保险）
+      const timeoutP = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const e = new Error(`工具 ${resolved} 执行超时（${Math.round(ToolRuntime.TIMEOUT_MS / 1000)}s 兜底熔断）`);
+          e.timeout = true;
+          reject(e);
+        }, ToolRuntime.TIMEOUT_MS);
+      });
+      let output;
+      try {
+        output = await Promise.race([runP, timeoutP]);
+      } finally {
+        clearTimeout(timer);
+      }
+      const s = String(output ?? '');
+      return { ok: true, output: s.length > ToolRuntime.OUTPUT_CAP ? s.slice(0, ToolRuntime.OUTPUT_CAP) + '\n…（输出过长已截断）' : s, durationMs: Date.now() - start };
     } catch (e) {
       e.durationMs = Date.now() - start;
       throw e;
@@ -525,4 +568,13 @@ export class ToolRuntime {
     const skillName = resolved.slice('skill:'.length);
     return this.skillSystem.executor.executeSkillStep(skillName, params, 'skill-tool');
   }
+
+  /** 锻造区工具热重载钩子（由 dynamic-tool-loader 注入；call 前检查 mtime 变更） */
+  setForgeReloader(fn) { this._forgeReloader = fn; }
+
+  /** 工具锻造管理（web API / executor 调用；由 dynamic-tool-loader 实现） */
+  setForgeApi(api) { this.forge = api; }
+
+  /** 并行子调研代理（D2）：由 agent-executor 注入 runSubagents 绑定 */
+  setSubagentRunner(fn) { this.subagentRunner = fn; }
 }
