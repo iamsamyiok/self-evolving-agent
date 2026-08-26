@@ -16,9 +16,9 @@ export async function runProbe(args) {
     if (expect_contains) checks.push({ name: 'contains', pass: html.includes(expect_contains), actual: '---' });
     if (expect_not_contains) checks.push({ name: 'not_contains', pass: !html.includes(expect_not_contains), actual: '---' });
     const titleM = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    if (expect_title) checks.push({ name: 'title', pass: html.includes(expect_title), actual: titleM?.[1] ?? '(无<title>)' });
+    if (expect_title) checks.push({ name: 'title', pass: (titleM?.[1] ?? '').includes(expect_title), actual: titleM?.[1] ?? '(无<title>)' });
     const h1M = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-    if (expect_h1) checks.push({ name: 'h1', pass: !!h1M, actual: h1M?.[1] ?? '(无<h1>)' });
+    if (expect_h1) checks.push({ name: 'h1', pass: (h1M?.[1] ?? '').includes(expect_h1), actual: h1M?.[1] ?? '(无<h1>)' });
     const allPass = checks.length === 0 || checks.every((c) => c.pass);
     return JSON.stringify({ url: parsed.href, status: resp.status, ok: allPass, checks }, null, 2);
   } finally { clearTimeout(timer); }

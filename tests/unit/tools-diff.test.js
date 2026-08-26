@@ -42,6 +42,23 @@ describe('tools-diff', () => {
     assert.ok(j.unifiedDiff.includes('+ delta'));
   });
 
+  test('纯插入场景：新增行不误报删除', () => {
+    const r = runDiff({ input_a: 'x', input_b: 'x\nNEW1\nNEW2' });
+    const j = JSON.parse(r);
+    assert.equal(j.hasDiff, true);
+    assert.equal(j.addedLines, 2);
+    assert.equal(j.deletedLines, 0);
+    assert.ok(j.unifiedDiff.includes('+ NEW1'));
+  });
+
+  test('纯删除场景：删除行不误报新增', () => {
+    const r = runDiff({ input_a: 'a\nb\nc', input_b: 'a\nc' });
+    const j = JSON.parse(r);
+    assert.equal(j.deletedLines, 1);
+    assert.equal(j.addedLines, 0);
+    assert.ok(j.unifiedDiff.includes('- b'));
+  });
+
   test('缺少参数抛错', () => {
     assert.throws(() => runDiff({}), /须传入/);
     assert.throws(() => runDiff({ input_a: 'x' }), /须传入/);

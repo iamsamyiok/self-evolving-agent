@@ -1,5 +1,5 @@
 // core/tools-stat.js —— 文件客观统计（零 token）：字符/行数/字节/CJK/修改时间
-import { statSync, readdirSync, existsSync, readFileSync, globSync as _none } from 'node:fs';
+import { statSync, readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 export function runStat(args) {
   const { path: p } = args ?? {};
@@ -24,34 +24,4 @@ function _statOne(p) {
   const lines = content.split('\n').length;
   const cjk = [...content].filter((c) => /[\u3000-\u9fff\uff00-\uffef]/.test(c)).length;
   return JSON.stringify({ path: p, type: 'file', bytes: st.size, chars: content.length, cjkChars: cjk, lines, modifiedAt: st.mtime.toISOString() }, null, 2);
-}
-function _simpleGlob(base, pattern) {
-  const parts = pattern.replace(/\.\.\//g, '../').split('/');
-  const out = [];
-  function walk(dir, idx) {
-    let entries = [];
-    try { entries = readdirSync(dir); } catch { return; }
-    const pat = parts[idx];
-    if (!pat) { if (idx === parts.length) out.push(dir); return; }
-    for (const e of entries) {
-      if (e.startsWith('.')) continue;
-      const full = join(dir, e);
-      if (idx === parts.length - 1) {
-        if (_match(pat, e)) out.push(full);
-      } else {
-        try { if (statSync(full).isDirectory()) walk(full, idx + 1); } catch { /* */ }
-      }
-    }
-  }
-  walk(base, 0);
-  return out;
-}
-function _match(pat, str) {
-  if (pat === '*') return !str.includes('/');
-  if (pat === '**') return true;
-  if (pat.includes('*')) {
-    const re = new RegExp('^' + pat.replace(/\./g, '\\.').replace(/\*/g, '.+') + '$');
-    return re.test(str);
-  }
-  return pat === str;
 }

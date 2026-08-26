@@ -54,7 +54,7 @@ function matchesWhere(row, where) {
     case '>=': return Number(cell) >= Number(val);
     case '<=': return Number(cell) <= Number(val);
     case 'contains': return cell.includes(val);
-    case 'like': return new RegExp(val.replace(/[.+?*^$(){}|]/g, '\\$&')).test(cell);
+    case 'like': return new RegExp(val.replace(/[.+?*^$()[\]{}|\\/]/g, '\\$&')).test(cell);
     default: return true;
   }
 }

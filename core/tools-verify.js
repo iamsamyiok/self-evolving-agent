@@ -4,7 +4,9 @@ import { join } from 'node:path';
 export function runVerify(args, workspace) {
   const { rules, file, text, base64 } = args ?? {};
   if (!rules || !Array.isArray(rules) || rules.length === 0) throw new Error('rules 必传，且须为非空数组');
-  if (!file && !text && !base64) throw new Error('须传 file 或 text 或 base64');
+  // file_exists 类规则不需要数据源（断言的是规则自身路径）；其余规则必须有 file/text/base64 之一
+  const needsSource = rules.some((r) => (r?.type ?? 'contains') !== 'file_exists');
+  if (needsSource && file == null && text == null && base64 == null) throw new Error('须传 file 或 text 或 base64');
   const results = [];
   for (const rule of rules) {
     const r = _evalOne(rule, file, text, base64, workspace);
@@ -36,7 +38,8 @@ function _evalOne(rule, file, text, base64, workspace) {
       case 'not_contains': return { type, pass: !target.includes(rule.value), message: rule.value };
       case 'file_exists': return { type, pass: existsSync(_resolvePath(rule.value, workspace)), message: rule.value };
       case 'line_count': {
-        const lines = target.split('\n').length;
+        // 去掉末尾单个换行再数行，避免 "a\nb\n" 数出 3 行（尾随换行产生的幻影空行）
+        const lines = target.replace(/\n$/, '').split('\n').length;
         const op = rule.op ?? '==', n = Number(rule.value);
         let pass;
         if (op === '==') pass = lines === n;

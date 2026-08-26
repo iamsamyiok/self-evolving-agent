@@ -5,6 +5,8 @@ import { CONFIG } from '../config/index.js';
 import { extractJSON, validateShape } from '../utils/parser.js';
 import { normalizeVec } from '../utils/similarity.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 // ── 任务上下文（等待状态上报：chat() 深处的 429/排队等待要能通知到任务进度回调）──
 // agent-executor 在任务入口 run(...{progress})，chat() 等待时经此上报 → 前端不再静默僵死。
@@ -28,13 +30,51 @@ async function abortableSleep(ms) {
 }
 
 // ── token 用量计量（三层预算 L1任务/L2周期/L3日 的数据源，标签化归集）──
+// 用量快照持久化到 <DATA_DIR>/inner-usage.json（脏标记 + 5s 防抖落盘；跨日归档进 history），
+// 供 usage 工具跨进程/跨重启查询（内存 getUsage 仍是权威数据源）。
 const usage = { day: dayKey(), tokensIn: 0, tokensOut: 0, calls: 0, errors: 0 };
 const usageByLabel = new Map(); // label -> { tokensIn, tokensOut, calls }
 function dayKey(d = new Date()) { return d.toISOString().slice(0, 10); }
 function freshLabelUsage() { return { tokensIn: 0, tokensOut: 0, calls: 0 }; }
+function usageFile() { return join(CONFIG.DATA_DIR, 'inner-usage.json'); }
+function readUsageFile() {
+  try {
+    const d = JSON.parse(readFileSync(usageFile(), 'utf8'));
+    return { current: d.current ?? {}, history: Array.isArray(d.history) ? d.history : [], dayStart: d.dayStart ?? null };
+  } catch { return { current: {}, history: [], dayStart: null }; }
+}
+let usageDirty = false;
+function flushUsageFile() {
+  if (!usageDirty) return;
+  usageDirty = false;
+  try {
+    mkdirSync(CONFIG.DATA_DIR, { recursive: true });
+    const disk = readUsageFile();
+    writeFileSync(usageFile(), JSON.stringify({
+      current: { ...usage },
+      byLabel: Object.fromEntries(usageByLabel),
+      history: disk.history.slice(-30),
+      dayStart: usage.day,
+    }, null, 2), 'utf8');
+  } catch { /* 落盘失败不影响请求 */ }
+}
+const usageFlushTimer = setInterval(flushUsageFile, 5000);
+usageFlushTimer.unref?.();
 export function getUsage(label = null) {
   const today = dayKey();
   if (usage.day !== today) {
+    // 跨日归档：把前一天总量追加进 history 再清零（先落一次盘防丢失）
+    const prevDay = usage.day;
+    const totals = { day: prevDay, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut, calls: usage.calls, errors: usage.errors };
+    usageDirty = true; flushUsageFile();
+    try {
+      const disk = readUsageFile();
+      if (!disk.history.some((h) => h.day === prevDay) && (totals.tokensIn + totals.tokensOut) > 0) {
+        disk.history.push(totals);
+        mkdirSync(CONFIG.DATA_DIR, { recursive: true });
+        writeFileSync(usageFile(), JSON.stringify({ current: { day: prevDay, ...totals }, byLabel: Object.fromEntries(usageByLabel), history: disk.history.slice(-30), dayStart: prevDay }, null, 2), 'utf8');
+      }
+    } catch { /* 归档失败不影响清零 */ }
     usage.day = today; usage.tokensIn = 0; usage.tokensOut = 0; usage.calls = 0; usage.errors = 0;
     usageByLabel.clear();
   }
@@ -57,6 +97,7 @@ function recordUsage(u, label) {
     l.tokensIn += tin; l.tokensOut += tout; l.calls++;
     usageByLabel.set(label, l);
   }
+  usageDirty = true;
 }
 
 // ── 令牌桶限流器（§4.2：免费版限制 ~20 请求/分钟）──

@@ -1,39 +1,50 @@
-// core/tools-usage.js —— 用量查询：当前/历史记录/预算状态（零 token，纯 DB 读取）
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+// core/tools-usage.js —— 用量查询：当前/历史/预算（零 token）
+// 数据源分层：current/budget 走 llm-adapter 内存计数（权威，同进程实时）；
+// history 走 <DATA_DIR>/inner-usage.json（llm-adapter 防抖落盘 + 跨日归档，跨重启可查）。
+import { getUsage } from './llm-adapter.js';
+import { CONFIG } from '../config/index.js';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+
 export function runUsage(args) {
   const { action, label, days = 7, limit = 20 } = args ?? {};
-  const dbDir = process.env.SPA_DATA_DIR ?? join(process.cwd(), 'data');
-  const dbFile = join(dbDir, 'app.db');
-  if (!existsSync(dbFile)) throw new Error(`数据库不存在：${dbFile}，请先执行任务`);
-  // SQLite 是二进制文件，用 better-sqlite3 不行（需原生模块），改用 inner-usage.json
-  const usageFile = join(dbDir, 'inner-usage.json');
-  if (action === 'get' || !action) return _current(usageFile);
-  if (action === 'history') return _history(usageFile, days, limit, label);
-  if (action === 'budget') return _budget(usageFile);
-  throw new Error(`未知 action：${action}（支持 get/history/budget）`);
+  if (action === 'history') return _history(days, limit, label);
+  if (action === 'budget') return _budget(label);
+  if (action && action !== 'get') throw new Error(`未知 action：${action}（支持 get/history/budget）`);
+  return _current(label);
 }
-function _current(usageFile) {
-  try {
-    const d = JSON.parse(readFileSync(usageFile, 'utf8'));
-    return JSON.stringify({ current: d.current ?? {}, dayStart: d.dayStart ?? null }, null, 2);
-  } catch { return JSON.stringify({ current: {}, note: '尚未生成用量记录' }); }
+function _current(label) {
+  const u = getUsage(label ?? null);
+  return JSON.stringify({ scope: label ? `label:${label}` : 'day', ...u, dailyBudget: CONFIG.DAILY_TOKEN_BUDGET }, null, 2);
 }
-function _history(usageFile, days, limit, label) {
-  try {
-    const d = JSON.parse(readFileSync(usageFile, 'utf8'));
-    const history = (d.history ?? []).filter((r) => !label || r.label === label);
-    const cutoff = Date.now() - days * 86400000;
-    return JSON.stringify({ days, label, cutoff, total: history.length, recent: history.slice(-limit).reverse() }, null, 2);
-  } catch { return JSON.stringify({ history: [], note: '暂无历史记录' }); }
+function _budget(label) {
+  const u = getUsage(label ?? null);
+  const budget = label ? 50_000 : CONFIG.DAILY_TOKEN_BUDGET; // 标签默认 L1 任务预算 50k
+  const used = u.tokensIn + u.tokensOut;
+  const pct = budget > 0 ? Math.round((used / budget) * 100) : 0;
+  return JSON.stringify({ scope: label ? `label:${label}` : 'day', dailyBudget: budget, used, remaining: Math.max(0, budget - used), pctUsed: pct }, null, 2);
 }
-function _budget(usageFile) {
-  try {
-    const d = JSON.parse(readFileSync(usageFile, 'utf8'));
-    const config = JSON.parse(readFileSync(join(process.cwd(), 'config', 'local.json'), 'utf8') ?? '{}');
-    const budget = config.DAILY_TOKEN_BUDGET ?? 200000;
-    const used = (d.current ?? {}).tokensIn + (d.current ?? {}).tokensOut;
-    const pct = budget > 0 ? Math.round((used / budget) * 100) : 0;
-    return JSON.stringify({ dailyBudget: budget, used, remaining: Math.max(0, budget - used), pct }, null, 2);
-  } catch { return JSON.stringify({ note: '无法读取配置' }); }
+function _history(days, limit, label) {
+  const file = join(CONFIG.DATA_DIR, 'inner-usage.json');
+  let history = [];
+  let byLabel = {};
+  if (existsSync(file)) {
+    try {
+      const d = JSON.parse(readFileSync(file, 'utf8'));
+      history = Array.isArray(d.history) ? d.history : [];
+      byLabel = d.byLabel ?? {};
+    } catch { /* 坏文件按空历史处理 */ }
+  }
+  const cutoff = dayKeyNago(days);
+  // 有 label 时返回该标签当日累计（历史按日聚合，不含标签维度）
+  if (label) {
+    const l = byLabel[label] ?? { tokensIn: 0, tokensOut: 0, calls: 0 };
+    return JSON.stringify({ days, label, scope: 'current-day', ...l }, null, 2);
+  }
+  const rows = history.filter((r) => r.day >= cutoff).slice(-limit).reverse();
+  return JSON.stringify({ days, label: null, total: rows.length, recent: rows }, null, 2);
+}
+function dayKeyNago(n) {
+  const d = new Date(Date.now() - n * 86400000);
+  return d.toISOString().slice(0, 10);
 }

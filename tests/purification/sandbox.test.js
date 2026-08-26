@@ -14,7 +14,8 @@ test.before(async () => {
   ({ ToolRuntime } = await import('../../core/tool-runtime.js'));
   ({ checkStep } = await import('../../core/safety-constitution.js'));
   ({ CONFIG } = await import('../../config/index.js'));
-  tools = new ToolRuntime({ workspace: join(dir, 'ws') });
+  // 注意：第一形参是 store；workspace 须放第二参（此前误传成 store，导致写入真实全局工作区）
+  tools = new ToolRuntime(null, { workspace: join(dir, 'ws') });
 });
 
 test('路径逃逸：../ 与绝对路径一律拒绝', async () => {
@@ -31,12 +32,23 @@ test('高危写：无理由拒绝；凭据内容拒绝', async () => {
 });
 
 test('网络白名单：非白名单域名拒绝（R5）', async () => {
-  await assert.rejects(() => tools.call('http_get', { url: 'https://evil.example.com/x' }), /R5.*白名单/);
-  await assert.rejects(() => tools.call('http_get', { url: 'https://api.deepseek.com/v1?token=sk-abcdef0123456789abcdef' }), /R4/);
+  // 开发环境常设 TOOL_NET_OPEN=1（任意公网放行）；本用例固定走白名单模式再恢复
+  const saved = CONFIG.TOOL_NET_OPEN;
+  CONFIG.TOOL_NET_OPEN = false;
+  try {
+    await assert.rejects(() => tools.call('http_get', { url: 'https://evil.example.com/x' }), /R5.*白名单/);
+    await assert.rejects(() => tools.call('http_get', { url: 'https://api.deepseek.com/v1?token=sk-abcdef0123456789abcdef' }), /R4/);
+  } finally { CONFIG.TOOL_NET_OPEN = saved; }
 });
 
-test('shell 工具默认禁用；破坏性命令模式拒绝', async () => {
-  await assert.rejects(() => tools.call('shell', { cmd: 'dir', use_reason: '测试用途说明' }), /R2.*默认禁用/);
+test('shell 工具：总开关关闭时默认禁用；开启后破坏性命令模式拒绝', async () => {
+  const saved = CONFIG.TOOL_SHELL_ENABLED;
+  try {
+    CONFIG.TOOL_SHELL_ENABLED = false;
+    await assert.rejects(() => tools.call('shell', { cmd: 'ls', use_reason: '测试用途说明文字' }), /R2.*默认禁用/);
+    CONFIG.TOOL_SHELL_ENABLED = true;
+    await assert.rejects(() => tools.call('shell', { cmd: 'rm -rf /', use_reason: '测试破坏性命令拦截路径' }), /R2.*破坏性/);
+  } finally { CONFIG.TOOL_SHELL_ENABLED = saved; }
 });
 
 test('R4：读取含凭据的文件拒绝外传', async () => {

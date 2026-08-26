@@ -75,13 +75,27 @@ describe('tools-verify', () => {
     assert.equal(r.passAll, true);
   });
 
-  test('line_count 断言', () => {
-    // sample.txt 有 3 行（含末尾空行），用 >= 断言
+  test('仅 file_exists 规则无需数据源', () => {
     const r = JSON.parse(runVerify({
-      rules: [{ type: 'line_count', value: 3, op: '>=' }],
+      rules: [
+        { type: 'file_exists', value: 'sample.txt' },
+        { type: 'file_exists', value: 'config.json' },
+        { type: 'file_exists', value: 'nope.txt' },
+      ],
+    }, WS));
+    assert.equal(r.passAll, false);
+    assert.equal(r.passed, 2);
+    assert.equal(r.failed, 1);
+  });
+
+  test('line_count 断言：尾随换行不产生幻影行', () => {
+    // sample.txt = 'Hello World\nLine 2\nLine 3\n' → 3 行（不是 4）
+    const r = JSON.parse(runVerify({
+      rules: [{ type: 'line_count', value: 3, op: '==' }],
       file: 'sample.txt'
     }, WS));
     assert.equal(r.passAll, true);
+    assert.equal(r.details[0].actual, 3);
   });
 
   test('多规则混合：部分失败', () => {
