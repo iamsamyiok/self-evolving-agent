@@ -106,6 +106,36 @@ footer{padding:8px 16px 16px;background:var(--bg)}
 .inbox-top{display:flex;gap:8px;align-items:flex-end}
 textarea{flex:1;background:none;border:none;color:var(--txt);font-size:15px;font-family:inherit;resize:none;outline:none;max-height:180px;line-height:34px;padding:0} /* line-height=按钮高：单行时文字与两侧圆形按钮精确居中 */
 #sendBtn,.attach-btn{width:34px;height:34px;border-radius:50%;border:1px solid var(--line);background:var(--chip);color:var(--dim);font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s;margin-bottom:0}
+
+/* 深度档位选择器（⚡/标准/深研） */
+.depth-seg{display:flex;border:1px solid var(--line);border-radius:16px;overflow:hidden;flex-shrink:0;margin-bottom:0}
+.depth-seg button{border:0;background:transparent;color:var(--dim);font-size:11px;padding:0 10px;height:30px;cursor:pointer;transition:all .15s}
+.depth-seg button+button{border-left:1px solid var(--line)}
+.depth-seg button.on{background:var(--acc);color:#fff;font-weight:600}
+
+/* 引用上标（[n] → 可点击跳来源卡片） */
+sup.cite{font-size:10px;background:var(--chip);border:1px solid var(--line);border-radius:8px;padding:0 5px;margin:0 1px;color:var(--acc);cursor:pointer;vertical-align:super;white-space:nowrap}
+sup.cite:hover{filter:brightness(1.15)}
+
+/* 证据来源卡片 */
+.src-list{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
+.src-title{font-size:11px;color:var(--dim);margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.src-title .exp-btn{font-size:11px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:1px 8px;cursor:pointer;color:var(--dim)}
+.src-title .exp-btn:hover{color:var(--acc);border-color:var(--acc)}
+.src-item{display:flex;gap:8px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px dotted var(--line)}
+.src-item:last-child{border-bottom:0}
+.src-n{flex-shrink:0;color:var(--acc);font-weight:700;font-size:11px}
+.src-t{color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52%}
+.src-u{color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.src-u a{color:var(--dim);text-decoration:none}
+.src-u a:hover{color:var(--acc)}
+
+/* 计划确认按钮组 */
+.plan-confirm{display:flex;gap:8px;align-items:center;margin:6px 0;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--chip)}
+.plan-confirm .pc-txt{font-size:12px;color:var(--fg);flex:1}
+.plan-confirm button{font-size:12px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--fg);padding:4px 14px;cursor:pointer}
+.plan-confirm button.pc-go{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:600}
+.plan-confirm button.pc-stop{color:var(--bad)}
 #sendBtn{background:var(--acc);border-color:var(--acc);color:#fff;font-size:17px}
 #sendBtn:disabled{opacity:.35;cursor:default}
 #sendBtn.stop{background:#666;border-color:#666;font-size:12px}
@@ -198,6 +228,9 @@ aside.evo h3:first-child{margin-top:0}
           <input type="file" id="imgInput" accept="image/*" multiple style="display:none" onchange="handleImageUpload(event)">
           <button class="attach-btn" onclick="document.getElementById('imgInput').click()" title="附带图片">＋</button>
           <textarea id="ta" rows="1" placeholder="输入消息…（可附带图片）"></textarea>
+          <div class="depth-seg" id="depthSeg" title="深度档位：闪电=直答 · 标准=规划执行 · 深研=多源检索+缺口迭代+报告">
+            <button data-d="light">⚡</button><button data-d="standard" class="on">标准</button><button data-d="deep">深研</button>
+          </div>
           <button id="sendBtn" onclick="doSend()" title="发送">↑</button>
         </div>
       </div>
@@ -261,7 +294,7 @@ aside.evo h3:first-child{margin-top:0}
 'use strict';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={convs:[],convId:null,sending:false,evoOpen:false,attachedImages:[]};
+const state={convs:[],convId:null,sending:false,evoOpen:false,attachedImages:[],depth:localStorage.getItem('evo_depth')||'standard'};
 
 /* ── markdown-lite ── */
 function md(s){
@@ -275,7 +308,9 @@ function md(s){
   s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<pre>'+c.replace(/\n$/,'')+'</pre>');
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+  s=s.replace(/^## (.+)$/gm,'<b style="font-size:15px">$1</b>');
   s=s.replace(/^### (.+)$/gm,'<b>$1</b>');
+  s=s.replace(/^[-*] (.+)$/gm,'&bull; $1');
   s=s.replace(/\n/g,'<br>');
   return s;
 }
@@ -298,6 +333,11 @@ function md(s){
   await refreshConvs();
   await refreshLlmPill();
   setInterval(refreshEvoPill,5000);
+  // 深度档位选择器：持久化 + 三档互斥高亮
+  const seg=$('depthSeg');
+  const syncDepthUI=()=>{seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.d===state.depth));};
+  seg.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;state.depth=b.dataset.d;localStorage.setItem('evo_depth',state.depth);syncDepthUI();});
+  syncDepthUI();
   $('ta').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}});
   $('ta').addEventListener('input',()=>{const t=$('ta');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,180)+'px';});
   $('impFile').addEventListener('change',async e=>{
@@ -412,10 +452,61 @@ function aiHtml(thinking,content,meta){
   if(u.memories?.length)chips+=`<span class="chip" title="${esc(u.memories.map(x=>x.excerpt).join('\n'))}">🧠 记忆 ×${u.memories.length}</span>`;
   if(u.experiences?.length)chips+=`<span class="chip" title="${esc(u.experiences.map(x=>x.summary).join('\n'))}">📚 经验 ×${u.experiences.length}</span>`;
   if(m.quick)chips+='<span class="chip">⚡ 快速</span>';
+  if(m.depth==='deep')chips+='<span class="chip" title="多路检索 · 缺口迭代 · 证据引用">🔍 深研</span>';
   if(m.durationMs!=null)chips+=`<span class="chip">${(m.durationMs/1000).toFixed(1)}s</span>`;
   const exec=thinking?`<div class="exec done"><div class="exec-h"><span class="dot"></span>执行过程</div><div class="exec-b">${thinking}</div></div>`:'';
-  const body=m.error&&!content?`<span class="err">${esc(m.error)}</span>`:md(content);
-  return `${exec}<div class="bub">${body}</div>${chips?`<div class="meta">${chips}</div>`:''}`;
+  let body=m.error&&!content?`<span class="err">${esc(m.error)}</span>`:md(content);
+  // 引用上标：[n] 仅在证据存在且序号有效时转换为可点击标记（跳转来源卡片）
+  const ev=m.evidence||[];
+  if(ev.length&&body){
+    body=body.replace(/\[(\d{1,2})\]/g,(mm,n)=>{const i=Number(n);return i>=1&&i<=ev.length?`<sup class="cite" onclick="flashSrc(this,${i})">${n}</sup>`:mm;});
+  }
+  // 证据来源卡片 + 报告导出（深研交付物的可验证性载体）
+  const srcList=ev.length?`<div class="src-list" id="src-${m.taskId||''}">
+    <div class="src-title"><span>来源（${ev.length} 条证据）</span><button class="exp-btn" onclick="exportReport(this)" data-task="${esc(m.taskId||'')}">⤓ 导出报告</button></div>
+    ${ev.map(e=>`<div class="src-item" id="srcn-${m.taskId||''}-${e.n}"><span class="src-n">[${e.n}]</span><span class="src-t" title="${esc(e.title)}">${esc(e.title)}</span><span class="src-u">${e.url?`<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.source||e.url.slice(0,40))}</a>`:esc(e.source||'网络')}</span></div>`).join('')}
+  </div>`:'';
+  return `${exec}<div class="bub">${body}</div>${srcList}${chips?`<div class="meta">${chips}</div>`:''}`;
+}
+
+/* 引用上标 → 闪烁定位来源条目 */
+function flashSrc(sup,n){
+  const list=sup.closest('.body')?.querySelector('.src-list');
+  const item=list?.querySelector(`.src-item:nth-child(${n+1})`)||list?.querySelectorAll('.src-item')[n-1];
+  if(item){item.scrollIntoView({behavior:'smooth',block:'center'});item.style.background='var(--chip)';setTimeout(()=>{item.style.background='';},1200);}
+}
+
+/* 报告导出：回答 + 证据清单 → Markdown 文件下载（纯前端，零后端成本） */
+function exportReport(btn){
+  const bodyEl=btn.closest('.body');
+  const bub=bodyEl?.querySelector('.bub');
+  const srcList=bodyEl?.querySelectorAll('.src-item');
+  const title=($('convTitle')?.textContent||'研究报告').trim();
+  const lines=[`# ${title}`,'',`> 导出自 evo-agent · ${new Date().toLocaleString('zh-CN')}`,''];
+  if(bub){
+    // 剥离 sup.cite 标记保留 [n] 文本，代码块保留
+    const clone=bub.cloneNode(true);
+    clone.querySelectorAll('sup.cite').forEach(s=>s.replaceWith(`[${s.textContent}]`));
+    clone.querySelectorAll('br').forEach(b=>b.replaceWith('\n'));
+    clone.querySelectorAll('pre').forEach(p=>{p.replaceWith('\n```\n'+p.textContent+'\n```\n');});
+    lines.push(clone.textContent.trim()
+      .replace(/<b>(.*?)<\/b>/g,'**$1**')
+      .replace(/^### (.+)$/gm,'### $1'),'');
+  }
+  if(srcList?.length){
+    lines.push('## 来源','');
+    srcList.forEach((it,i)=>{
+      const n=it.querySelector('.src-n')?.textContent||`[${i+1}]`;
+      const t=it.querySelector('.src-t')?.textContent||'';
+      const u=it.querySelector('.src-u a')?.href||'';
+      lines.push(`- ${n} ${t}${u?` — ${u}`:''}`);
+    });
+  }
+  const blob=new Blob([lines.join('\n')],{type:'text/markdown;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=`报告-${title.slice(0,20)}-${Date.now()}.md`;
+  a.click();URL.revokeObjectURL(a.href);
 }
 
 /* ── 实时执行渲染器：行级 DOM 增量更新 + 每步内容折叠展示 ── */
@@ -551,13 +642,38 @@ async function doSend(){
   let streamBub=null; // answer 打字机气泡（delta 事件增量写入；renderDone 时整体重写）
   const renderStage=(evt)=>{
     if(evt.stage==='start'){view.set('正在接收任务…');if(evt.taskId){taskId=evt.taskId;activeTaskId=evt.taskId;}}
-    else if(evt.stage==='pre_search'){view.set('预检索真实信息（规划前）…');view.cur('预检索：'+(String(evt.query||'').slice(0,48)+'…'));}
+    else if(evt.stage==='pre_search'){
+      view.set(evt.parallel?'多路并行检索真实信息…':'预检索真实信息（规划前）…');
+      if(evt.parallel&&evt.queries?.length)view.cur(`并行 ${evt.queries.length} 路检索：${evt.queries.map(q=>String(q).slice(0,16)).join(' / ')}…`);
+      else view.cur('预检索：'+(String(evt.query||'').slice(0,48)+'…'));
+    }
     else if(evt.stage==='plan'){view.set('规划中…');view.plan(evt.steps);}
+    else if(evt.stage==='plan_confirm'){
+      // 计划确认窗口：用户放行/叫停（60s 超时自动继续）
+      view.set('等待计划确认…');
+      view.finishLine();
+      const d=document.createElement('div');d.className='plan-confirm';
+      d.innerHTML=`<span class="pc-txt">计划已生成——确认执行？<span style="color:var(--dim)">（60s 后自动继续）</span></span>
+        <button class="pc-go">确认执行</button><button class="pc-stop">停止</button>`;
+      const go=d.querySelector('.pc-go'),stopB=d.querySelector('.pc-stop');
+      const settle=(ok)=>{go.disabled=stopB.disabled=true;d.style.opacity='.55';go.textContent=ok?'已确认，执行中…':'已停止';if(!ok)stopActive();};
+      go.onclick=()=>{settle(true);if(activeTaskId)fetch('/api/task/'+activeTaskId+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"approve":true}'}).catch(()=>{});};
+      stopB.onclick=()=>{settle(false);};
+      body.appendChild(d);const m=$('messages');m.scrollTop=m.scrollHeight;
+    }
+    else if(evt.stage==='plan_confirmed'){if(evt.via==='auto')view.info('⏱','计划确认超时，自动继续执行');else view.info('✓','计划已确认，开始执行');}
     else if(evt.stage==='replan'){view.warn(`重新规划（第 ${evt.attempt} 次）：${evt.reason||''}`);}
     else if(evt.stage==='step'){view.set('执行中…');view.step(evt);}
     else if(evt.stage==='retry'){view.warn(`参数修正重试：${evt.error||''}`);}
     else if(evt.stage==='degrade'){view.warn(`「${evt.goal||''}」降级为自身推理（${evt.reason||''}）`);}
     else if(evt.stage==='step_done'){view.stepDone({goal:evt.goal||'',output:evt.output||evt.preview});}
+    else if(evt.stage==='research_gap'){
+      // 信息缺口叙事：用户看得懂"它为什么在补搜这个"
+      view.set('发现信息缺口，补充检索…');
+      view.warn(`覆盖面检查（第 ${evt.round} 轮）：证据存在缺口 → 补搜「${(evt.gaps||[]).join('」「')}」`);
+    }
+    else if(evt.stage==='gap_ok'){view.info('✓',`证据覆盖面检查通过（第 ${evt.round||1} 轮），信息充分`);}
+    else if(evt.stage==='distilled'){view.info('⤓',`步骤产出蒸馏：${evt.from??'?'} → ${evt.to??'?'} 字符（保要点/数字/来源）`);}
     else if(evt.stage==='answer'){view.set('综合回答中…');view.cur(evt.label||'综合回答');}
     else if(evt.stage==='delta'){
       // token 级打字机：首个 delta 建气泡，后续追加；完成后 renderDone 用 md 版整体重写
@@ -583,7 +699,7 @@ async function doSend(){
     refreshEvoPill();
   };
   try{
-    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content,images}),signal:activeAC?.signal});
+    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversationId:state.convId,content,images,depth:state.depth}),signal:activeAC?.signal});
     const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
     while(true){
       const{done,value}=await reader.read();if(done)break;

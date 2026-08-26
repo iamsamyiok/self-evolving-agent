@@ -1,6 +1,6 @@
 {
   "name": "self-evolve",
-  "version": "1.5.1",
+  "version": "1.5.3",
   "description": "evo-agent · Self-Evolving AI Agent — skills/memories/experiences that evolve with every task. Zero dependencies. npm i -g self-evolve && self-evolve",
   "type": "module",
   "license": "MIT",

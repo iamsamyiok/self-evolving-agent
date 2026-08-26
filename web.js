@@ -252,6 +252,17 @@ export class WebServer {
         return send(200, this.importShare(b));
       }
       if (req.method === 'POST' && path === '/api/chat') return this.handleChat(req, res, await body());
+      // 计划确认（deep 模式）：plan_confirm 事件后用户点击「确认执行」/「停止」
+      const approveMatch = path.match(/^\/api\/task\/([\w-]+)\/approve$/);
+      if (approveMatch && req.method === 'POST') {
+        const live = WebServer.liveTasks.get(approveMatch[1]);
+        if (live?.approve) {
+          const b = await body().catch(() => ({}));
+          live.approve(b.approve !== false); // 默认 true；显式 false = 用户停止
+          return send(200, { ok: true });
+        }
+        return send(200, { ok: false, reason: 'not_awaiting' });
+      }
       // 技能版本历史 / 手动回滚（污染恢复运维入口）
       const verMatch = path.match(/^\/api\/skills\/([\w-]+)\/versions$/);
       if (verMatch && req.method === 'GET') return send(200, this.executor.skills.versions(verMatch[1]));
@@ -293,8 +304,8 @@ export class WebServer {
     }
   }
 
-  /** 流式对话：NDJSON 事件流（conversation / stage / done / error）。images: dataURL 数组（多模态输入，≤4 张） */
-  async handleChat(req, res, { conversationId, content, quick = false, images = [] }) {
+  /** 流式对话：NDJSON 事件流（conversation / stage / done / error）。images: dataURL 数组（多模态输入，≤4 张）；depth: light|standard|deep */
+  async handleChat(req, res, { conversationId, content, quick = false, images = [], depth = 'standard' }) {
     // 图片校验与收口：仅收 data:image/* 且单张 ≤6MB、最多 4 张（防超大 payload 撑爆库/LLM 请求）
     const imgs = (Array.isArray(images) ? images : [])
       .filter((u) => typeof u === 'string' && /^data:image\/[\w.+-]+;base64,/.test(u) && u.length <= 8_000_000)
@@ -367,7 +378,7 @@ export class WebServer {
 
     // 活动任务注册：流断开后前端轮询 /api/task/:id 也能拿到实时进度事件（断流不丢展示）
     const taskId = uuid7();
-    const live = { events: [], done: false, result: null, at: Date.now(), abort: false };
+    const live = { events: [], done: false, result: null, at: Date.now(), abort: false, approve: null };
     WebServer.liveTasks.set(taskId, live);
     if (WebServer.liveTasks.size > 50) {
       const now = Date.now();
@@ -376,15 +387,21 @@ export class WebServer {
       }
     }
     try {
-      send({ type: 'stage', stage: 'start', quick, taskId });
-      live.events.push({ stage: 'start', quick, taskId }); // 与流事件序列完全对齐（轮询补渲染下标一致）
+      send({ type: 'stage', stage: 'start', quick, depth, taskId });
+      live.events.push({ stage: 'start', quick, depth, taskId }); // 与流事件序列完全对齐（轮询补渲染下标一致）
+      // 计划确认桥：executor awaitApproval 挂起 → approve 端点 resolve（一次性的 promise）
+      let releaseApproval = null;
+      const approvalPromise = new Promise((resolve) => { releaseApproval = resolve; });
+      live.approve = (ok) => { live.approve = null; releaseApproval(ok); };
       const trace = await this.loop.submitTask(input, {
         quick,
+        depth,
         silent: true,
         taskId,
         images: imgs, // 多模态：dataURL 随任务下发（quick/planner/step/final 用户消息组装 image_url）
         conversationId: conv.id, // 会话隔离：记忆检索本会话加权、沉淀记忆携带会话标签
         isAborted: () => live.abort === true, // 停止端点置位 → LLM 等待/排队/步骤边界协作式中断
+        awaitApproval: depth === 'deep' ? () => approvalPromise : undefined, // deep 模式：计划确认窗口（60s 超时自动放行）
         onProgress: (e) => {
           // delta 打字机事件：合并进上一条（同流相邻 delta 文本拼接）——数百 token 不膨胀 live.events，轮询补渲染下标仍对齐
           const last = live.events[live.events.length - 1];
@@ -393,14 +410,18 @@ export class WebServer {
           send({ type: 'stage', ...e });
         },
       });
+      // 任务结束兜底放行（计划确认还挂着时避免 promise 泄漏）
+      live.approve?.(true);
       const meta = {
         outcome: trace.outcome,
         basis: trace.basis,
         durationMs: trace.duration_ms,
         quick,
+        depth,
         contextUsed: trace.contextUsed ?? { skills: [], memories: [], experiences: [] },
         taskId: trace.id,
         error: trace.error,
+        evidence: Array.isArray(trace.evidence) && trace.evidence.length ? trace.evidence : undefined, // 深研证据（前端渲染来源卡片 + 引用上标）
       };
       const msgId = this.addMessage(conv.id, 'assistant', trace.answer ?? `（任务失败：${trace.error ?? '未知错误'}）`, { taskId: trace.id, meta });
       live.result = { outcome: trace.outcome, basis: trace.basis, answer: trace.answer, error: trace.error, durationMs: trace.duration_ms, meta };

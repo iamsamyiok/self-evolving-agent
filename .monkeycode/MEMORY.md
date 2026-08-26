@@ -198,3 +198,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 安装模式数据隔离：仓库内无 config/local.json 时 IS_PACKAGED=true，数据/配置/沙箱落 ~/.self-evolve/（SPA_DATA_HOME 可重定向，测试用）；开发仓库行为不变
   - 发布前必做：npm pack --dry-run 检查清单不含 data/、config/local.json、.monkeycode/；node --check 是 CJS 解析，bin 用 ESM 须 node 直接执行验证；干净 prefix 安装 + 起服务 + curl 200 全链路验证
   - server.listen 的 EADDRINUSE 是异步 'error' 事件，try/catch 接不住——必须 promise 内 this.server.once('error', reject)（web.js listen 与 extend/monitor-view.js listen 均已修）
+
+[Project Knowledge Summary]
+- Date: 2026-08-26
+- Context: Agent 完成深度研究管线（v1.5.3：多路检索+证据账本+缺口迭代+计划确认+报告引用）
+- Category: Build Methods
+- Instructions:
+  - 深研架构：core/research.js 零依赖纯函数层——EvidenceBook（URL 去重/编号/citationList/toJSON）+ parseSearchResults（`N. 标题\n来源：\n链接：\n摘要：` 格式，编号行即条目起点不做连续性校验）+ multiQuery/parallelSearch/gapCheck/distillSteps（全部失败降级：gapCheck 失败→sufficient:true 防死循环）
+  - 深度档位：opts.depth = light（quick 直答，实时问题自动升级）| standard | deep（多路预检索+计划确认+缺口补搜+蒸馏+引用注入）；evidence 挂 _runTask 外层作用域供 trace/补搜/最终复用
+  - 计划确认：web.js 传 awaitApproval 闭包 → /api/task/:id/approve 端点；Promise.race 60s 超时自动放行；用户拒绝错误（含"计划确认"）须排除出 replan 可恢复集合（否则拒绝会被重跑违背用户意图）
+  - 引用链：final system prompt 注入编号证据清单→模型输出 [n]→前端 md() 后替换为 sup.cite（仅 n≤evidence.length 才转换，防幻觉引用）→点击闪跳来源卡片；导出纯前端 Blob 下载 .md
+  - web 冒烟端口：SPA_WEB_PORT（非 SPA_PORT！）+ SPA_DASHBOARD_PORT；平台预览服务长驻 3789（旧代码），测新代码须换端口
+  - 教训：curl 打旧实例会拿到"看似正常"的旧版响应（无新事件/新字段）——EADDRINUSE 日志才是判据；上轮 v1.5.2 发版漏提交 package.json 版本号（HEAD 1.5.1/npm 1.5.2），发版前须 diff 确认
