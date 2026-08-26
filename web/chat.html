@@ -229,7 +229,7 @@ aside.evo h3:first-child{margin-top:0}
           <button class="attach-btn" onclick="document.getElementById('imgInput').click()" title="附带图片">＋</button>
           <textarea id="ta" rows="1" placeholder="输入消息…（可附带图片）"></textarea>
           <div class="depth-seg" id="depthSeg" title="深度档位：闪电=直答 · 标准=规划执行 · 深研=多源检索+缺口迭代+报告">
-            <button data-d="light">⚡</button><button data-d="standard" class="on">标准</button><button data-d="deep">深研</button>
+            <button data-d="light" aria-label="直答"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></button><button data-d="standard" class="on">标准</button><button data-d="deep">深研</button>
           </div>
           <button id="sendBtn" onclick="doSend()" title="发送">↑</button>
         </div>
@@ -528,6 +528,7 @@ function makeExecView(container){
      },
     cur(label){
       if(curLine){this.finishLine();}
+      body.style.display=''; // 首条进度行即展开面板（预检索/阶段事件不再藏在折叠区里）
       const d=document.createElement('div');d.className='ln cur';d.id='curln';
       d.innerHTML=`<span class="spin">●</span><span>${esc(label)}</span>`;
       body.appendChild(d);curLine=d;startTimer();scrollTop();
@@ -578,8 +579,8 @@ function makeExecView(container){
       curLine.innerHTML=`<span class="tick">✓</span><span>${esc(lbl)}</span>`;
       curLine=null;if(timerId){clearInterval(timerId);timerId=null;}
     },
-    warn(t){const d=document.createElement('div');d.className='ln warn-ln';d.innerHTML=`<span>⚠</span><span>${esc(t)}</span>`;body.appendChild(d);scrollTop();},
-    info(emoji,t){const d=document.createElement('div');d.className='ln';d.innerHTML=`<span>${emoji}</span><span>${esc(t)}</span>`;body.appendChild(d);scrollTop();},
+    warn(t){const d=document.createElement('div');d.className='ln warn-ln';d.innerHTML=`<span>⚠</span><span>${esc(t)}</span>`;body.style.display='';body.appendChild(d);scrollTop();},
+    info(emoji,t){const d=document.createElement('div');d.className='ln';d.innerHTML=`<span>${emoji}</span><span>${esc(t)}</span>`;body.style.display='';body.appendChild(d);scrollTop();},
     done(){this.stepDone();box.classList.remove('collapsed');title.textContent='执行过程';stopTimer();},
     html(){return body.style.display==='none'?'':`<div class="exec done"><div class="exec-h"><span class="dot"></span>执行过程</div><div class="exec-b">${body.innerHTML}</div></div>`;},
   };
@@ -647,6 +648,11 @@ async function doSend(){
       if(evt.parallel&&evt.queries?.length)view.cur(`并行 ${evt.queries.length} 路检索：${evt.queries.map(q=>String(q).slice(0,16)).join(' / ')}…`);
       else view.cur('预检索：'+(String(evt.query||'').slice(0,48)+'…'));
     }
+    else if(evt.stage==='phase'){
+      // 阶段事件：每次 LLM 调用开始时上报（规划/检索查询生成/缺口检查/蒸馏/判定），行级计时让"在干啥"可见
+      view.set((evt.label||'处理中')+'…');
+      view.cur(evt.label||'处理中');
+    }
     else if(evt.stage==='plan'){view.set('规划中…');view.plan(evt.steps);}
     else if(evt.stage==='plan_confirm'){
       // 计划确认窗口：用户放行/叫停（60s 超时自动继续）
@@ -669,11 +675,12 @@ async function doSend(){
     else if(evt.stage==='step_done'){view.stepDone({goal:evt.goal||'',output:evt.output||evt.preview});}
     else if(evt.stage==='research_gap'){
       // 信息缺口叙事：用户看得懂"它为什么在补搜这个"
+      view.finishLine();
       view.set('发现信息缺口，补充检索…');
       view.warn(`覆盖面检查（第 ${evt.round} 轮）：证据存在缺口 → 补搜「${(evt.gaps||[]).join('」「')}」`);
     }
-    else if(evt.stage==='gap_ok'){view.info('✓',`证据覆盖面检查通过（第 ${evt.round||1} 轮），信息充分`);}
-    else if(evt.stage==='distilled'){view.info('⤓',`步骤产出蒸馏：${evt.from??'?'} → ${evt.to??'?'} 字符（保要点/数字/来源）`);}
+    else if(evt.stage==='gap_ok'){view.finishLine();view.info('✓',`证据覆盖面检查通过（第 ${evt.round||1} 轮），信息充分`);}
+    else if(evt.stage==='distilled'){view.finishLine();view.info('⤓',`步骤产出蒸馏：${evt.from??'?'} → ${evt.to??'?'} 字符（保要点/数字/来源）`);}
     else if(evt.stage==='answer'){view.set('综合回答中…');view.cur(evt.label||'综合回答');}
     else if(evt.stage==='delta'){
       // token 级打字机：首个 delta 建气泡，后续追加；完成后 renderDone 用 md 版整体重写
@@ -682,11 +689,13 @@ async function doSend(){
       const m=$('messages');m.scrollTop=m.scrollHeight;
     }
     else if(evt.stage==='llm_wait'){
-      // 限流等待透明化：任务没死，是在排队等配额（免费版 ~20 次/分钟）
+      // 限流/排队/生成心跳透明化：任务没死，模型还在工作（免费版 ~20 次/分钟）
       const sec=evt.waitSec??'?';
       const pos=evt.position??'?';
       view.set(evt.kind==='rate_limit'
         ?`服务限流，${sec}s 后自动重试（耐心 ${evt.nth}/${evt.max} 轮）`
+        :evt.kind==='generating'
+        ?`模型生成中… 已 ${sec}s（长回答属正常，非卡死）`
         :`排队等待模型配额（前方 ${pos} 个请求，已等 ${sec}s）…`);
     }
   };

@@ -202,6 +202,10 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
 
   // 获取令牌（限流）
   await acquireToken();
+  // 生成心跳：请求进行中每 8s 上报一次（前端显示"模型生成中… 已 Ns"——让用户区分"长生成"与"卡死"）
+  let hb = null;
+  const hbStart = () => { if (hb) return; const t0 = Date.now(); hb = setInterval(() => notifyWait({ stage: 'llm_wait', kind: 'generating', waitSec: Math.round((Date.now() - t0) / 1000) }), 8000); };
+  const hbStop = () => { if (hb) { clearInterval(hb); hb = null; } };
   let lastErr;
   let waits429 = 0; // 429 专属耐心额度：不消耗常规重试预算，重新排队等令牌再试
   for (let attempt = 0; attempt <= CONFIG.LLM_MAX_RETRIES; attempt++) {
@@ -213,6 +217,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
     const abortWatch = setInterval(() => { if (isAborted()) ac.abort(); }, 500);
     try {
       usage.calls++;
+      hbStart();
       const res = await fetch(`${eff.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${eff.apiKey}` },
@@ -223,6 +228,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       if (res.status === 429) {
         // 服务端限流：按 Retry-After（无头则指数等待 5s→10s→20s→40s→60s）等待 + 重新排队令牌。
         // 不等待立即重试只会在 1s 内烧光耐心轮（服务端限流窗口通常 ≥30s）。
+        hbStop(); // 等待期由 rate_limit 事件接管心跳叙事
         if (waits429 < (CONFIG.LLM_429_MAX_WAITS ?? 5)) {
           waits429++;
           const ra = Number(res.headers.get('retry-after') ?? 0);
@@ -239,6 +245,7 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
       if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`), { retryable: false });
       // 流式分支：SSE 逐 delta 回调（onDelta），完整文本照常返回——重试/429/熔断语义与非流式完全一致
       if (stream && onDelta && res.body) {
+        hbStop(); // delta 逐 token 到达本身就是活性信号，心跳让位
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '', full = '', u = null;
@@ -267,11 +274,12 @@ export async function chat({ messages, temperature = 0.2, json = false, maxToken
         return { text: full, usage: u };
       }
       const data = await res.json();
+      hbStop();
       breakerRecord(true);
       recordUsage(data?.usage, label);
       return { text: data?.choices?.[0]?.message?.content ?? '', usage: data?.usage };
     } catch (err) {
-      clearTimeout(timer); clearInterval(abortWatch);
+      clearTimeout(timer); clearInterval(abortWatch); hbStop();
       if (isAborted()) throw ABORT_ERR; // fetch 被停止信号掐断：直接终止，不进重试
       // 429 属限流预期（已有令牌桶控速 + 指数退避），不计入熔断窗口——否则正常高峰也会误熔断
       if (!String(err.message).startsWith('HTTP 429')) breakerRecord(false);

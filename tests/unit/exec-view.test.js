@@ -47,6 +47,28 @@ test('完整事件序列不抛错', () => {
   assert.ok(typeof v.html() === 'string');
 });
 
+test('阶段/心跳/缺口事件序列不抛错（v1.5.4 反馈增强）', () => {
+  const v = makeExecView(makeEl());
+  v.set('正在接收任务…');
+  v.cur('生成多角度检索查询');           // phase 事件
+  v.cur('规划任务步骤');                 // phase：自动关闭上一行
+  v.plan(['检索', '综合']);
+  v.cur('步骤 1/2：检索');
+  v.stepDone({ goal: '检索', output: '命中 6 条' });
+  v.cur('检查证据覆盖面（第 1 轮）');    // gap 前置 phase
+  v.finishLine();
+  v.warn('覆盖面检查（第 1 轮）：证据存在缺口 → 补搜「x」');
+  v.cur('蒸馏执行产出要点');             // distilled 前置 phase
+  v.finishLine();
+  v.info('⤓', '步骤产出蒸馏：12000 → 800 字符');
+  v.set('模型生成中… 已 8s（长回答属正常，非卡死）'); // generating 心跳：仅改标题
+  v.cur('综合回答');
+  v.finishLine();                        // 首个 delta 到达
+  v.cur('判定任务结果');                 // judge phase
+  v.done();
+  assert.ok(typeof v.html() === 'string');
+});
+
 test('stepDone 无当前行也不丢折叠块', () => {
   const v = makeExecView(makeEl());
   v.stepDone({ goal: 'x', output: 'y' }); // 无 step 在前：不抛错

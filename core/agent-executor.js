@@ -244,6 +244,7 @@ export class AgentExecutor {
             if (deep || researchy) {
               let queries = [refinedQuery];
               if (labelBudgetLeft(label, CONFIG.TASK_TOKEN_BUDGET) > 20_000) {
+                progress({ stage: 'phase', label: '生成多角度检索查询' });
                 const multi = await multiQuery(input, { label });
                 if (multi?.length >= 2) queries = [...new Set([refinedQuery, ...multi])].slice(0, 3);
               }
@@ -280,6 +281,7 @@ export class AgentExecutor {
         answer = fin.text?.trim();
         plan = { steps: [], quick: true };
       } else {
+        progress({ stage: 'phase', label: '规划任务步骤' });
         for (let i = 0; i <= CONFIG.PLAN_RETRY_MAX && !plan; i++) {
           plan = await this.planOnce(input, context, label, images);
         }
@@ -334,6 +336,7 @@ export class AgentExecutor {
             if (labelBudgetLeft(label, CONFIG.TASK_TOKEN_BUDGET) <= 10_000) break;
             const ub2 = this.store.getState('user_toolbox', { runtime: true, network: true, fileio: true, shell: true });
             if (!ub2.network || !this.tools.get('news_search')) break;
+            progress({ stage: 'phase', label: `检查证据覆盖面（第 ${round} 轮）` });
             const gc = await gapCheck(input, evidence, { label });
             if (gc.sufficient) {
               if (round === 1) progress({ stage: 'gap_ok', round }); // 证据充分：叙事外显（用户看得到"验证过覆盖面"）
@@ -359,6 +362,7 @@ export class AgentExecutor {
         // 上下文分级：步骤总产出超阈值时先蒸馏成要点（保数字/结论/来源序号），防 final 撑爆上下文
         let stepsForFinal = steps.map(({ full, ...s }) => ({ ...s, output: full ?? s.output }));
         if (deep || stepsForFinal.length >= 5) {
+          progress({ stage: 'phase', label: '蒸馏执行产出要点' });
           const d = await distillSteps(stepsForFinal, { label });
           if (d.distilled) {
             stepsForFinal = d.steps;
@@ -389,6 +393,7 @@ export class AgentExecutor {
         progress({ stage: 'replan', reason: error.slice(0, 120), attempt: replanned });
         try {
           const lesson = `【上次尝试失败的教训】已完成步骤：${JSON.stringify(steps.map((s) => s.goal))}；错误：${error}。请换一种分解思路或工具组合避开该错误。`;
+          progress({ stage: 'phase', label: '重新规划（吸取失败教训）' });
           const rePlan = await this.planOnce(`${input}\n${lesson}`, context, label);
           if (rePlan?.steps?.length) {
             plan = rePlan;
@@ -438,6 +443,7 @@ export class AgentExecutor {
         if (solid && !opts.goldenCheck) {
           outcome = 'SUCCESS'; basis = 'heuristic';
         } else {
+          progress({ stage: 'phase', label: '判定任务结果' });
           const j = await this.judgeOutcome(input, answer, label);
           outcome = j.outcome; basis = j.basis;
         }

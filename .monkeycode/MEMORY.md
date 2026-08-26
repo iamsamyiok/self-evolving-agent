@@ -210,3 +210,9 @@ Entries discovered by the Agent during task execution should follow this format:
   - 引用链：final system prompt 注入编号证据清单→模型输出 [n]→前端 md() 后替换为 sup.cite（仅 n≤evidence.length 才转换，防幻觉引用）→点击闪跳来源卡片；导出纯前端 Blob 下载 .md
   - web 冒烟端口：SPA_WEB_PORT（非 SPA_PORT！）+ SPA_DASHBOARD_PORT；平台预览服务长驻 3789（旧代码），测新代码须换端口
   - 教训：curl 打旧实例会拿到"看似正常"的旧版响应（无新事件/新字段）——EADDRINUSE 日志才是判据；上轮 v1.5.2 发版漏提交 package.json 版本号（HEAD 1.5.1/npm 1.5.2），发版前须 diff 确认
+- Date: 2026-08-26（v1.5.4 执行反馈增强）
+- Instructions:
+  - 反馈三层架构：phase 事件（agent-executor 在 5 个 LLM 调用点前发 {stage:'phase',label}→前端 view.cur 行级计时）+ 生成心跳（llm-adapter chat() 请求进行中每 8s 发 {stage:'llm_wait',kind:'generating',waitSec}，仅改标题不加行）+ 流式 delta 本身即活性信号（首个 delta 前的 TTFB 由心跳覆盖）
+  - 心跳停止点：429 分支停（rate_limit 事件接管）/流式分支到 headers 即停/非流式 json() 完成后停/catch 必停；MOCK 模式不走心跳
+  - "输入框黑点"根因：⚡ emoji 在无 emoji 字体环境渲染成几个像素的深色小块——UI 控件图标一律用内联 SVG（fill=currentColor 跟随主题色），禁用 emoji 字符做控件图标
+  - UI 验证环境：/tmp/opencode/uitest 装有 playwright-core + chromium-headless-shell（系统依赖已 apt 装齐），可 node shot.js 截图 + 像素扫描（自写 PNG 解码 scan.js）/ASCII 渲染（ascii.js）定位视觉缺陷；image_analysis MCP 余额不足时用像素扫描替代
