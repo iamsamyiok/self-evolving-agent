@@ -230,6 +230,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - 测试套件：`node --test tests/unit/*.test.js`，当前 68 项全绿（42 原有 + 26 新）
 
 [Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.9 来源点击修复）
+- Context: 用户反馈点击来源条目打不开网页
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 根因一：来源条目（aiHtml 生成的 src-item）只有右侧 .src-u 里的小 <a> 可点，标题/序号是纯文本——UI 可点区域必须覆盖整行，不能只给角落小字
+  - 根因二：平台预览是 iframe 嵌入，sandbox 未开 allow-popups 时 target=_blank 被静默拦截（点 <a> 也无反应，无任何报错）——预览内所有外链必须走 openExternal 兜底链：window.open → window.top.location 顶层导航 → prompt 可复制链接
+  - 防双开三件套：全局捕获委托统一处理 a[href]；内层锚点不放 inline onclick；整行 onclick 带 event.target.closest('a') 守卫
+  - openExternal 对非 http(s) href（站内 # 锚点）直接 return 不 preventDefault，否则站内跳转会被点死
+  - onclick 属性里塞 URL 用 esc(JSON.stringify(url))：&amp;/&quot; 在 HTML 属性解码后是合法 JS 字符串
+  - 修改来源卡片/链接行为后必跑 tests/unit/source-card-click.test.js（切源码手法同 exec-view）+ md-autolink.test.js + exec-view.test.js
+  - 预览 3789 实例对 web/chat.html 是每请求重读文件——改 HTML 刷新页面即生效，无需杀进程重启；改 web.js 才需要重启
+
+[Project Knowledge Summary]
 - Date: 2026-08-26（v1.5.8 来源链接直达）
 - Context: 用户要求所有"来源"必须有可点击链接直达原始信息源
 - Category: Build Methods
