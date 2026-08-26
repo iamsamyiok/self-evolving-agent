@@ -1,6 +1,8 @@
 // core/agent-executor.js —— L6 执行内核（§5.4）：上下文装配（先预算后填充）→ 规划 → 分步执行（含工具/红线）→ 判定 → 轨迹落库
 // v0.2：任务预算 L1 熔断、Prompt 版本化（策略净化地基）、检索权重可调参、工具步骤执行
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { CONFIG } from '../config/index.js';
 import { Store, uuid7, runExclusive } from './store-base.js';
 import { MemorySystem } from './memory-system.js';
@@ -89,6 +91,14 @@ function _expandRefStr(s, steps) {
     const txt = String(st.full ?? st.output ?? '');
     return txt || mm;
   });
+}
+
+/** 交付物落盘内容挑选：答案含匹配扩展名的围栏代码块时只取块内内容（.json 文件不夹散文），否则整篇答案 */
+export function pickDeliverableContent(answer, path) {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const m = String(answer ?? '').match(/```(\w*)\r?\n([\s\S]*?)```/);
+  if (m && (!m[1] || m[1].toLowerCase() === ext)) return m[2].trim();
+  return String(answer ?? '').trim();
 }
 
 export class AgentExecutor {
@@ -551,6 +561,23 @@ export class AgentExecutor {
         if (!repaired?.text?.trim()) break; // 返修失败保留原交付
         answer = repaired.text.trim();
         progress({ stage: 'intent_repair', round, gaps: v.gaps.length });
+        // 文件类缺口文本返修永远闭环不了（LLM 只能改字不能写盘）——修复后的答案直接落盘补齐硬断言
+        const missingFiles = (intent.deliverables ?? []).filter((d) => {
+          if (!d.path) return false;
+          const abs = isAbsolute(d.path) ? d.path : join(this.tools?.workspace ?? process.cwd(), d.path);
+          return !existsSync(abs);
+        });
+        if (missingFiles.length) {
+          let written = 0;
+          for (const d of missingFiles) {
+            const content = pickDeliverableContent(answer, d.path);
+            try {
+              await this.tools.call('fs_write', { path: d.path, content, use_reason: '意图闭环补齐缺失交付物' });
+              written++;
+            } catch { /* 落盘失败留给下一轮硬断言暴露 */ }
+          }
+          if (written) progress({ stage: 'deliverable_fallback', files: written });
+        }
       }
     }
 
@@ -558,22 +585,41 @@ export class AgentExecutor {
     if (!error) {
       const judged = this.checkAssertion(input, answer, opts.assertion);
       if (judged.__pendingJudge) {
-        // verify 断言失败即视为交付物有硬伤——禁止启发式直通 SUCCESS，必须过 judge 并携带断言证据
-        const failedVerify = steps.filter((s) => /^tool:verify/.test(String(s.action)) && /"passAll"\s*:\s*false/.test(String(s.output ?? '')));
+        // verify 断言失败即视为交付物有硬伤——但意图闭环可能已补写文件：按 plan 原参重跑一次，恢复的不再算失败
+        const failedVerify = [];
+        for (const s of steps) {
+          if (!/^tool:verify/.test(String(s.action)) || !/"passAll"\s*:\s*false/.test(String(s.output ?? ''))) continue;
+          let recovered = false;
+          try {
+            const planStep = (plan?.steps ?? []).find((p) => String(p.action) === 'tool:verify' && p.goal === s.goal && p.params);
+            if (planStep) {
+              const rr = await this.tools.call('verify', expandStepRefs(planStep.params ?? {}, steps)).catch(() => null);
+              const j = rr?.output ? JSON.parse(rr.output) : null;
+              if (j?.passAll === true) {
+                recovered = true;
+                s.output = `${String(s.output).slice(0, 400)}\n（复验通过：意图闭环补写文件后按原断言重跑，passAll=true）`;
+              }
+            }
+          } catch { /* 复验异常按原失败处理 */ }
+          if (!recovered) failedVerify.push(s);
+        }
         const verifyCtx = failedVerify.length
           ? `注意：任务中的 verify 断言步骤报告失败（交付物可能不符合要求）：\n${failedVerify.map((s) => String(s.output).replace(/\s+/g, ' ').slice(0, 300)).join('；')}`
           : null;
-        // 低成本启发式优先（judge 降本）：步骤全成功 + 无降级 + 无断言失败 + 回答实质性（>30字或含列表/数字）→ 直接 SUCCESS，省一次 LLM 调用
+        // 文件类交付物缺失同样是硬伤——禁启发式直通，证据交给 judge
+        const hardMiss = intent ? assertDeliverables(intent, this.tools?.workspace).filter((r) => r.startsWith('FAIL')) : [];
+        const gapCtx = verifyCtx ?? (hardMiss.length ? `注意：以下要求的交付物文件仍不存在：${hardMiss.map((r) => r.slice(5)).join('；')}` : null);
+        // 低成本启发式优先（judge 降本）：步骤全成功 + 无降级 + 无断言失败 + 交付物齐全 + 回答实质性（>30字或含列表/数字）→ 直接 SUCCESS，省一次 LLM 调用
         const solid = steps.length > 0
           && degradeNotes.length === 0
           && !replanned
-          && !verifyCtx
+          && !gapCtx
           && (String(answer ?? '').length > 30 || /\d|[-•*]|\n/.test(String(answer ?? '')));
         if (solid && !opts.goldenCheck) {
           outcome = 'SUCCESS'; basis = 'heuristic';
         } else {
           progress({ stage: 'phase', label: '判定任务结果' });
-          const j = await this.judgeOutcome(input, answer, label, verifyCtx);
+          const j = await this.judgeOutcome(input, answer, label, gapCtx);
           outcome = j.outcome; basis = j.basis;
         }
       } else {

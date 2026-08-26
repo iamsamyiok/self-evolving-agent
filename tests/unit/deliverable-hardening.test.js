@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ToolRuntime } from '../../core/tool-runtime.js';
+import { pickDeliverableContent } from '../../core/agent-executor.js';
 import runJsTool from '../../tools/run_js.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'deliverable-'));
@@ -54,4 +55,19 @@ test('verify 经归一化后用 path 参数即可断言文件（真实回归 run
   const r = await rt.call('verify', { rules: [{ type: 'json_valid' }, { type: 'file_exists', value: 'pricing.json' }], path: 'pricing.json' });
   const j = JSON.parse(r.output);
   assert.equal(j.passAll, true);
+});
+
+test('pickDeliverableContent：答案含匹配扩展名围栏块时只取块内内容', () => {
+  const ans = '分析如下：\n```json\n{"monthly": 546500}\n```\n以上是结论。';
+  assert.equal(pickDeliverableContent(ans, 'pricing-analysis.json'), '{"monthly": 546500}');
+});
+
+test('pickDeliverableContent：围栏语言与扩展名不匹配时取整篇答案', () => {
+  const ans = '如下：\n```python\nprint(1)\n```\n结论完。';
+  assert.equal(pickDeliverableContent(ans, 'out.json'), ans.trim());
+});
+
+test('pickDeliverableContent：无围栏块时整篇答案落盘', () => {
+  const ans = '纯文本交付内容';
+  assert.equal(pickDeliverableContent(ans, 'note.md'), '纯文本交付内容');
 });
