@@ -230,6 +230,20 @@ Entries discovered by the Agent during task execution should follow this format:
   - 测试套件：`node --test tests/unit/*.test.js`，当前 68 项全绿（42 原有 + 26 新）
 
 [Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.7 审查修复轮）
+- Context: 对 v1.5.6 八工具做代码审查，修复 6 处实际缺陷 + 沙箱测试隔离问题
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - usage 工具数据源分层：current/budget 走 llm-adapter 内存 getUsage()（同进程权威实时）；history 走 <DATA_DIR>/inner-usage.json（recordUsage 脏标记 + 5s 防抖落盘 unref 定时器 + 跨日归档保 30 天）。禁止再裸读 config/local.json 算预算——打包模式下路径不对，必须 import CONFIG
+  - ZIP 中央目录字段偏移：nameLen 在 +28、extraLen +30、commentLen +32、compSize +20、localOffset +42、name 数据在 +46；局部头 nameLen +26、extraLen +28、数据 +30+nameLen+extraLen，局部 size 为 0 时回退中央目录值（data descriptor）。v1.5.6 曾把 nameLen 读在 +26 导致 DOCX/XLSX 全部找不到条目
+  - deflate 解压用 node:zlib inflateRawSync——仍是零第三方依赖；真实 DOCX/XLSX 几乎全是 deflate 条目，只支持存储型的解析器等于不可用
+  - PDF 文本提取：字符串以 \xFE\xFF 开头走 UTF-16BE，否则 latin1 + PDFDocEncoding 高位映射（<0x80 必须 ASCII 原样，曾把空格映成右引号）；Tj 与 TJ 数组都要匹配；括号字符串须处理 \) \( \n \r \t 与八进制转义
+  - diff 算法：相等行原样保留即天然上下文；不匹配时先在对方序列 indexOf 找重对齐（窗口 200），判纯插入/纯删除，都找不到才按同行替换。禁止向 result 队首 unshift 上下文行（乱序）
+  - ToolRuntime 构造签名是 (store, {workspace})：workspace 在第二参。曾误传 new ToolRuntime({workspace}) 把 options 塞进 store 形参——workspace 静默落回全局 TOOL_WORKSPACE，测试写文件污染真实工作区（data/workspace/ok.txt 已移至 /tmp/opencode 备份）
+  - 沙箱类测试须固定 CONFIG 开关再恢复（TOOL_NET_OPEN / TOOL_NET_SHELL_ENABLED 默认为 1，开发环境与测试假设不一致会让 R5/R2 断言漂移到别的错误分支）
+  - 测试全量基线：npm test 175 绿（unit 159 + purification 6 + 其他）；曾见的"test 31 技能提炼"偶发失败是一次性状态残留，复跑即绿
+
+[Project Knowledge Summary]
 - Date: 2026-08-26（v1.5.6 插件生态集成）
 - Context: 补齐 dual-agent 仓库中与本项目对齐的缺失插件（diff/probe/query/stat/todo/doc/verify/usage）
 - Category: Build Methods
