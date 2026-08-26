@@ -303,3 +303,16 @@ Entries discovered by the Agent during task execution should follow this format:
   - 根因族谱：planner 选 answer 伪动作写文件 / JSON 计划无数据流表达（自造 {{报告内容}} 占位符）/ 高危工具 use_reason 未教 / stat-doc 用 cwd 与 fs_write 的 workspace 路径体系分裂 / verify 缺数据源 throw
   - 数据流解法：expandStepRefs（agent-executor.js 导出）——{{step:N}}/{{prev}}/{{steps_all}} 在红线检查前展开
   - 修复验证基准：同一深研任务 189s FAIL（文件未写）→ 76s SUCCESS（verify 3/3，stat 真实统计）
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.12 交付物质量硬化）
+- Context: 定价分析压测（搜索+run_js 算收入+写 JSON+verify+todo）暴露 4 缺陷：文件含新闻噪声与自造占位说明、run_js 输出数值全 null、verify/todo 各 1 次参数重试、judge 对断言失败仍判 SUCCESS
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - run_js 输出数值字段全 null 的真相：JSON.stringify 把 NaN 序列化为 null——planner 代码对不存在字段做算术（p.seats?p.users:… 判断字段不存在 → undefined*5=NaN）；工具忠实执行了错误代码，已在输出侧加数值健全性哨兵警告
+  - run_js/calc 是动态热插拔工具（tools/ 目录，dynamic-tool-loader 加载），单测直接 import '../../tools/run_js.js' 调 tool.run()；ToolRuntime 单测里它们不在注册表
+  - rt.call() 返回 {ok, output, durationMs} 对象，断言用 r.output 而非返回值本身
+  - normalizeParams 现覆盖 news_search/fs_read/fs_write/edit_file/fs_list/http_get/verify(path→file)/todo(task/title/content→text)；planner 写 verify 用 path、todo 用 task 是高频偏差
+  - 交付物引用去噪：{{steps_synthesis}} 只收非检索类步骤产出（排除 news_search/http_get/subagent），全检索时回退全量
+  - judge 硬化：步骤含 verify passAll:false 时禁用启发式直通，断言证据截断后注入 judge question
+  - 测试基线 216 绿（207 + 9：deliverable-hardening.test.js 7 + steps_synthesis 2）
