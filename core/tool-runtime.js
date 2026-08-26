@@ -10,6 +10,14 @@ import { promisify } from 'node:util';
 import { isIP } from 'node:net';
 import { CONFIG } from '../config/index.js';
 import { createSkill } from './skills/create-skill.js';
+import { runDiff } from './tools-diff.js';
+import { runProbe } from './tools-probe.js';
+import { runQuery } from './tools-query.js';
+import { runStat } from './tools-stat.js';
+import { runTodo } from './tools-todo.js';
+import { runDoc } from './tools-doc.js';
+import { runVerify } from './tools-verify.js';
+import { runUsage } from './tools-usage.js';
 
 const KEY_PATTERN = /sk-[a-zA-Z0-9]{16,}/;
 const lookupAll = promisify(lookup); // dns.lookup 是回调 API，须 promisify（{all:true} 时返回 [{address,family}]）
@@ -473,6 +481,46 @@ export class ToolRuntime {
       checkPermissions: () => (this.subagentRunner ? { ok: true } : { ok: false, reason: '子调研代理未注入（executor 初始化后可用）' }),
       run: async (p) => this.subagentRunner(p),
     });
+    // ── diff：文本/文件差异对比（零 token）──
+    this.register({
+      name: 'diff', desc: '文件或输入文本差异对比，输出 unified diff（- + 前缀），返回 hasDiff/addedLines/deletedLines/内容', risk: 'low', requiredParams: [],
+      run: (p) => runDiff(p),
+    });
+    // ── probe：HTTP 冒烟探测（零 token）──
+    this.register({
+      name: 'probe', desc: 'HTTP 端点冒烟验证：检查状态码/响应包含/标题/h1，支持超时（默认15s）', risk: 'low', requiredParams: ['url'],
+      run: (p) => runProbe(p),
+    });
+    // ── query：结构化数据查询（JSON 路径/CSV 筛选）──
+    this.register({
+      name: 'query', desc: '结构化数据提取：JSON 点路径（$a.b[0]）或 CSV-like 条件筛选（where=col==val）', risk: 'low', requiredParams: ['source'],
+      run: (p) => runQuery(p),
+    });
+    // ── stat：文件/目录客观统计（零 token）──
+    this.register({
+      name: 'stat', desc: '文件或目录统计：字节/字符/CJK字符数/行数/修改时间；支持 glob 批量', risk: 'low', requiredParams: ['path'],
+      run: (p) => runStat(p),
+    });
+    // ── todo：跨轮任务清单（存 workspace/.todo.json）──
+    this.register({
+      name: 'todo', desc: '任务清单管理（add/list/toggle/clear/delete），持久化到 workspace/.todo.json，供跨轮跟踪', risk: 'low', requiredParams: ['action'],
+      run: (p) => runTodo(p, this.workspace),
+    });
+    // ── doc：文档提取（txt/md/json/html/csv/log/pdf/docx/xlsx）──
+    this.register({
+      name: 'doc', desc: '本地文档提取为纯文本：支持 txt/md/json/html/csv/tsv/log/pdf(doc)/docx/xlsx（零依赖，纯 JS 解析）', risk: 'low', requiredParams: ['path'],
+      run: (p) => runDoc(p),
+    });
+    // ── verify：多规则断言器（零 token，一次性检查多条规则）──
+    this.register({
+      name: 'verify', desc: '批量断言器：rules=[{type:contains, value:"..."}, {type:regex, value:"..."}]，支持 exists/contains/regex/json_valid/min_length/max_length/eq/not_contains/file_exists/line_count，返回 passAll+详情', risk: 'low', requiredParams: ['rules'],
+      run: (p) => runVerify(p, this.workspace),
+    });
+    // ── usage：用量查询（get/history/budget）──
+    this.register({
+      name: 'usage', desc: '用量查询：get（当前日用量）/history（近N天记录）/budget（预算状态），零 token', risk: 'low', requiredParams: [],
+      run: (p) => runUsage(p),
+    });
     // ── 特高危：命令行（默认总开关关闭）──
     this.register({
       name: 'shell', desc: '受限子进程执行（默认禁用）', risk: 'critical',
@@ -577,4 +625,7 @@ export class ToolRuntime {
 
   /** 并行子调研代理（D2）：由 agent-executor 注入 runSubagents 绑定 */
   setSubagentRunner(fn) { this.subagentRunner = fn; }
+
+  /** todo 工作区：由 agent-executor 注入 */
+  setTodoWorkspace(ws) { this.todoWorkspace = ws; }
 }
