@@ -1,10 +1,12 @@
 // core/tools-stat.js —— 文件客观统计（零 token）：字符/行数/字节/CJK/修改时间
 import { statSync, readdirSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-export function runStat(args) {
+import { isAbsolute, join } from 'node:path';
+export function runStat(args, workspace) {
   const { path: p } = args ?? {};
   if (!p) throw new Error('须传 path');
-  return _statOne(p);
+  // 相对路径统一按沙箱 workspace 解析（与 fs_write/todo 同一体系，裸 cwd 会导致跨工具找不到彼此的文件）
+  const abs = isAbsolute(p) ? p : join(workspace ?? process.cwd(), p);
+  return _statOne(abs);
 }
 function _statOne(p) {
   if (!existsSync(p)) throw new Error(`路径不存在：${p}`);

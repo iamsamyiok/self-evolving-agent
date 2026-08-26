@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { runVerify } from '../../core/tools-verify.js';
 
 const WS = join(process.cwd(), '.tmp-verify-test');
+
+function mkdSync() { const d = join(process.cwd(), '.tmp-verify-auto-' + Math.random().toString(36).slice(2, 8)); mkdirSync(d, { recursive: true }); return d; }
+
 function setup() {
   if (!existsSync(WS)) mkdirSync(WS, { recursive: true });
   writeFileSync(join(WS, 'sample.txt'), 'Hello World\nLine 2\nLine 3\n');
@@ -114,4 +117,33 @@ describe('tools-verify', () => {
   test('缺少 rules 抛错', () => {
     assert.throws(() => runVerify({ text: 'hi' }), /rules 必传/);
   });
+});
+
+test('verify：file_exists+contains 混合规则缺 file 参数时自动取 file_exists 路径做断言对象（planner 高频形态）', () => {
+  const ws = mkdSync();
+  writeFileSync(join(ws, 'report.md'), '# 报告\nLangGraph 与 CrewAI 对比', 'utf8');
+  const rules = [
+    { type: 'file_exists', value: 'report.md' },
+    { type: 'contains', value: 'LangGraph' },
+    { type: 'contains', value: 'CrewAI' },
+  ];
+  const r = JSON.parse(runVerify({ rules }, ws));
+  assert.equal(r.passAll, true);
+  assert.equal(r.passed, 3);
+});
+
+test('verify：自动推断数据源文件缺失 → 结构化 passAll:false 而非 throw（断言失败是结果不是异常）', () => {
+  const ws = mkdSync();
+  const rules = [
+    { type: 'file_exists', value: 'missing.md' },
+    { type: 'contains', value: 'x' },
+  ];
+  const r = JSON.parse(runVerify({ rules }, ws));
+  assert.equal(r.passAll, false);
+  assert.equal(r.passed, 0);
+});
+
+test('verify：显式传 file 但文件不存在仍 throw（静默空串会掩盖路径写错）', () => {
+  const ws = mkdSync();
+  assert.throws(() => runVerify({ rules: [{ type: 'contains', value: 'x' }], file: 'typo.md' }, ws), /文件不存在/);
 });

@@ -19,6 +19,7 @@ aside.side.collapsed{margin-left:-260px}
 .conv:hover{background:var(--panel)}
 .conv.on{background:var(--panel)}
 .conv .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv .cnt{font-size:11px;color:var(--dim);background:var(--panel);border-radius:8px;padding:1px 6px;flex-shrink:0;min-width:20px;text-align:center}
 .conv .del{visibility:hidden;color:var(--dim);border:none;background:none;cursor:pointer;font-size:12px}
 .conv:hover .del{visibility:visible}
 /* 侧栏选中模式工具栏 */
@@ -383,11 +384,27 @@ document.addEventListener('click',(ev)=>{
   });
 }
 async function refreshConvs(){
-  state.convs=await (await fetch('/api/conversations')).json();
+  let convs;
+  try {
+    const r = await fetch('/api/conversations');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    convs = await r.json();
+  } catch(e) {
+    $('convs').innerHTML=`<div style="padding:12px;color:var(--bad);font-size:12px">加载对话列表失败：${esc(e.message)}</div>`;
+    return;
+  }
+  state.convs=convs;
+  // 有新对话时自动展开侧栏
+  const sb=$('sidebar');
+  if(sb&&sb.classList.contains('collapsed')&&convs.length>0){
+    sb.classList.remove('collapsed');
+    localStorage.setItem('spa_sidebar_open','1');
+  }
   $('convs').innerHTML=state.convs.map(c=>
-    `<div class="conv ${c.id===state.convId?'on':''}" data-conv-id="${c.id}" onclick="loadConv('${c.id}');if(selMode){event.stopPropagation();toggleConvSel('${c.id}')"}">
+    `<div class="conv ${c.id===state.convId?'on':''}" data-conv-id="${c.id}" title="点击查看历史对话" onclick="loadConv('${c.id}');if(selMode){event.stopPropagation();toggleConvSel('${c.id}')"}">
       ${selMode?`<input type="checkbox" ${selectedConvs.has(c.id)?'checked':''} onclick="event.stopPropagation();toggleConvSel('${c.id}')">`:''}
       <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+      <span class="cnt">${c.n}</span>
       ${!selMode?`<button class="del" onclick="event.stopPropagation();delConv('${c.id}')" title="删除">✕</button>`:''}
     </div>`
   ).join('')||'<div style="color:var(--dim);font-size:12px;padding:12px">暂无对话</div>';
@@ -450,12 +467,27 @@ async function refreshEvoPill(){
 async function newConv(){state.convId=null;location.reload();}
 async function loadConv(id){
   state.convId=id;
-  const msgs=await (await fetch(`/api/conversations/${id}/messages`)).json();
+  let msgs;
+  try {
+    const r = await fetch(`/api/conversations/${id}/messages`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    msgs = await r.json();
+  } catch(e) {
+    $('msgWrap').innerHTML=`<div style="padding:24px;color:var(--bad)">加载对话失败：${esc(e.message)}<br><button onclick="loadConv('${id}')" style="margin-top:8px;padding:4px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--txt);cursor:pointer">重试</button></div>`;
+    return;
+  }
   $('msgWrap').innerHTML='<div id="thread"></div>';
-  for(const m of msgs)renderMsg(m);
+  if(!msgs?.length){
+    $('msgWrap').innerHTML='<div id="thread"></div><div style="padding:24px;color:var(--dim);text-align:center">此对话暂无消息</div>';
+  } else {
+    for(const m of msgs)renderMsg(m);
+  }
   const conv=state.convs.find(c=>c.id===id);
   $('convTitle').textContent=conv?conv.title:'对话';
   refreshConvs();
+  // 展开侧栏便于查看：切换到对话时自动展开侧栏
+  const sb=$('sidebar');
+  if(sb&&sb.classList.contains('collapsed')){sb.classList.remove('collapsed');localStorage.setItem('spa_sidebar_open','1');}
 }
 async function delConv(id){await fetch(`/api/conversations/${id}`,{method:'DELETE'});if(state.convId===id)newConv();else refreshConvs();}
 function closeModal(id){$(id).classList.remove('open');}

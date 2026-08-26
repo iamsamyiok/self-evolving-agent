@@ -47,3 +47,12 @@ describe('tools-stat', () => {
     assert.throws(() => runStat({}), /须传/);
   });
 });
+
+test('stat：相对路径按 workspace 沙箱解析（与 fs_write 同一体系）', () => {
+  const ws = join(TMP, 'ws-rel');
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, 'rel.md'), '中文内容', 'utf8');
+  const r = JSON.parse(runStat({ path: 'rel.md' }, ws));
+  assert.equal(r.type, 'file');
+  assert.equal(r.cjkChars, 4);
+});

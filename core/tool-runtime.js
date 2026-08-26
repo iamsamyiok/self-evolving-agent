@@ -257,7 +257,7 @@ export class ToolRuntime {
     });
     // ── 高危：写（需技能步骤声明 use_reason）──
     this.register({
-      name: 'fs_write', desc: '写沙箱工作区内文件', risk: 'high', requiredParams: ['path', 'content'],
+      name: 'fs_write', desc: '写沙箱工作区内文件（参数：path + content 完整内容 + use_reason 使用理由≥4字）——「写入/保存/生成文件」必须用本工具；content 可用 {{step:N}} 引用第 N 步产出、{{prev}} 上一步、{{steps_all}} 全部产出（规划时内容未知的场景禁止写自造占位符文字）', risk: 'high', requiredParams: ['path', 'content'],
       checkPermissions: (p) => {
         const c = confine(p.path, this.workspace);
         if (!c.ok) return c;
@@ -499,7 +499,7 @@ export class ToolRuntime {
     // ── stat：文件/目录客观统计（零 token）──
     this.register({
       name: 'stat', desc: '文件或目录统计：字节/字符/CJK字符数/行数/修改时间；支持 glob 批量', risk: 'low', requiredParams: ['path'],
-      run: (p) => runStat(p),
+      run: (p) => runStat(p, this.workspace),
     });
     // ── todo：跨轮任务清单（存 workspace/.todo.json）──
     this.register({
@@ -509,7 +509,7 @@ export class ToolRuntime {
     // ── doc：文档提取（txt/md/json/html/csv/log/pdf/docx/xlsx）──
     this.register({
       name: 'doc', desc: '本地文档提取为纯文本：支持 txt/md/json/html/csv/tsv/log/pdf(doc)/docx/xlsx（零依赖，纯 JS 解析）', risk: 'low', requiredParams: ['path'],
-      run: (p) => runDoc(p),
+      run: (p) => runDoc(p, this.workspace),
     });
     // ── verify：多规则断言器（零 token，一次性检查多条规则）──
     this.register({

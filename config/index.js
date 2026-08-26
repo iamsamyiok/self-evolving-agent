@@ -126,6 +126,7 @@ export const CONFIG = {
   REPLAN_MAX: 2, // 执行失败后的重新规划次数（每次前置预算守卫，耗尽自动停）
   STEP_RETRY_MAX: 3,
   STEPS_DISTILL_MIN_CHARS: Number(env.SPA_STEPS_DISTILL_MIN_CHARS ?? local.STEPS_DISTILL_MIN_CHARS ?? 26_000), // 最终综合前 LLM 蒸馏的最小步骤产出量（低于此直接进 final，省一次阻塞调用；48K 预算内小上下文无需蒸馏）
+  PLAN_CONFIRM_TIMEOUT_MS: Number(env.SPA_PLAN_CONFIRM_TIMEOUT_MS ?? local.PLAN_CONFIRM_TIMEOUT_MS ?? 60_000), // deep 模式计划确认窗口（0=跳过，headless/自动化场景）
 
   // ── 黄金集冷启动 ──
   GOLDEN_AUTO_MAX: 50,

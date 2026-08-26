@@ -4,10 +4,10 @@ import { extname, isAbsolute, join } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
 const TEXT_CAP = 16000;
-export function runDoc(args) {
+export function runDoc(args, workspace) {
   const { path: p } = args ?? {};
   if (!p) throw new Error('path 必填（本地绝对路径或相对当前目录的路径）');
-  const fp = isAbsolute(p) ? p : join(process.cwd(), p);
+  const fp = isAbsolute(p) ? p : join(workspace ?? process.cwd(), p);
   if (!existsSync(fp)) throw new Error(`文件不存在：${fp}`);
   const st = statSync(fp);
   const ext = extname(fp).toLowerCase();
