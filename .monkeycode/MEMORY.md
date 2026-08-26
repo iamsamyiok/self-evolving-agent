@@ -328,3 +328,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - run7 完整韧性链实证：news_search 上游瞬时故障 → retry → degrade reason → 缺口补搜补回 → 意图返修 → 文件兜底 → judge SUCCESS（96.1s）
   - 压测交付物备份惯例：每轮 run 前把 data/workspace/ 旧交付物 mv 到 /tmp/opencode/runN-deliverable-backup.json，避免旧文件蒙混文件存在性断言
   - 测试基线 219 绿
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.6.0 CLI 生命周期）
+- Context: 为 self-evolve 包补全 npm 下载/安装/更新/卸载方案——新增 spa version / spa update 命令与文档
+- Category: Build Methods
+- Instructions:
+  - bin/spa.js 子命令：version/-v/--version（registry 查最新版）、update（semver 比较 + 自动 npm i -g，失败打印手动/离线 tgz 备选）
+  - SPA_NPM_REGISTRY 环境变量覆盖 registry（npmmirror 镜像同步滞后返回旧版时，cmpSemver 判断不误报"有新版"）
+  - CLI 测试密闭法：SPA_NPM_REGISTRY=http://127.0.0.1:9（discard 端口）使 fetch 必败，测试零外网依赖且绝不触发真实 npm install；registry 真实出现新版时 update 测试也不会误装
+  - 卸载方案只走文档指引（npm uninstall -g + rm -rf ~/.self-evolve），产品不做破坏性 uninstall 命令
+  - gh/git 认证过期时先跑 printf 'protocol=https\nhost=github.com\naction=get\n' | /app/agent/bin/agent git-credential-helper get | grep password | cut -d= -f2 | gh auth login --with-token，随后 git push 直接用 credential-helper 即可恢复
+  - 测试基线 223 绿
