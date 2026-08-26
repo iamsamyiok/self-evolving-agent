@@ -124,6 +124,9 @@ sup.cite:hover{filter:brightness(1.15)}
 .src-title .exp-btn:hover{color:var(--acc);border-color:var(--acc)}
 .src-item{display:flex;gap:8px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px dotted var(--line)}
 .src-item:last-child{border-bottom:0}
+.src-item.click{cursor:pointer;border-radius:6px;padding:3px 4px}
+.src-item.click:hover{background:var(--chip)}
+.src-item.click:hover .src-t{color:var(--acc)}
 .src-n{flex-shrink:0;color:var(--acc);font-weight:700;font-size:11px}
 .src-t{color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52%}
 .src-u{color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
@@ -326,6 +329,29 @@ function md(s){
   return s;
 }
 
+/* ── 外部链接打开兜底链 ──
+ * 预览环境运行在平台 iframe 内：sandbox 未开 allow-popups 时 target=_blank 被静默拦截。
+ * 统一走 openExternal：先试 window.open；被拦（返回 null）→ 试顶层窗口导航；
+ * 顶层也跨域被拦 → 弹可复制提示，保证"来源"总能到达原始信息源。 */
+function openExternal(ev,url){
+  if(!/^https?:\/\//i.test(url))return; // 非外链（站内锚点等）放行原生行为
+  try{if(ev)ev.preventDefault();}catch(_){}
+  const w=window.open(url,'_blank','noopener,noreferrer');
+  if(w)return false;
+  try{window.top.location.href=url;return false;}catch(_){}
+  prompt('当前预览环境阻止了直接打开外部链接，请复制以下地址到浏览器访问：',url);
+  return false;
+}
+
+/* 全局委托：正文自动链接/markdown 链接统一走兜底链（沙箱 iframe 内直接点 a 可能无反应） */
+document.addEventListener('click',(ev)=>{
+  const a=ev.target&&ev.target.closest?ev.target.closest('a[href]'):null;
+  if(!a)return;
+  const href=a.getAttribute('href')||'';
+  if(!/^https?:\/\//i.test(href))return;
+  openExternal(ev,href);
+},true);
+
 /* ── 初始化 ── */
  async function init(){
   // 鉴权：包装 fetch 自动附加 Bearer；401 时引导输入令牌（服务端 SPA_AUTH_TOKEN 启用时）
@@ -473,9 +499,10 @@ function aiHtml(thinking,content,meta){
     body=body.replace(/\[(\d{1,2})\]/g,(mm,n)=>{const i=Number(n);return i>=1&&i<=ev.length?`<sup class="cite" onclick="flashSrc(this,${i})">${n}</sup>`:mm;});
   }
   // 证据来源卡片 + 报告导出（深研交付物的可验证性载体）
+  const normUrl=(u)=>(/^https?:\/\//i.test(u)?u:'https://'+u.replace(/^\/+/,''));
   const srcList=ev.length?`<div class="src-list" id="src-${m.taskId||''}">
     <div class="src-title"><span>来源（${ev.length} 条证据）</span><button class="exp-btn" onclick="exportReport(this)" data-task="${esc(m.taskId||'')}">⤓ 导出报告</button></div>
-    ${ev.map(e=>`<div class="src-item" id="srcn-${m.taskId||''}-${e.n}"><span class="src-n">[${e.n}]</span><span class="src-t" title="${esc(e.title)}">${esc(e.title)}</span><span class="src-u">${e.url?`<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.source||e.url.slice(0,40))}</a>`:esc(e.source||'网络')}</span></div>`).join('')}
+    ${ev.map(e=>{const u=e.url?normUrl(String(e.url)):'';return `<div class="src-item${u?' click':''}" id="srcn-${m.taskId||''}-${e.n}"${u?` onclick="if(event.target.closest&&event.target.closest('a'))return;openExternal(event,${esc(JSON.stringify(u))})"`:''}><span class="src-n">[${e.n}]</span><span class="src-t" title="${esc(e.title)}">${esc(e.title)}</span><span class="src-u">${u?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(e.source||u.slice(0,40))}</a>`:esc(e.source||'网络')}</span></div>`;}).join('')}
   </div>`:'';
   return `${exec}<div class="bub">${body}</div>${srcList}${chips?`<div class="meta">${chips}</div>`:''}`;
 }
