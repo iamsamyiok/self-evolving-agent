@@ -316,3 +316,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 交付物引用去噪：{{steps_synthesis}} 只收非检索类步骤产出（排除 news_search/http_get/subagent），全检索时回退全量
   - judge 硬化：步骤含 verify passAll:false 时禁用启发式直通，断言证据截断后注入 judge question
   - 测试基线 216 绿（207 + 9：deliverable-hardening.test.js 7 + steps_synthesis 2）
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.13 意图闭环文件兜底）
+- Context: 定价任务复测 run5/6/7 发现意图闭环盲区——planner 随机漏规划 fs_write 时，文本返修永远补不上文件缺口
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 意图闭环（agent-executor.js）修复链：judgeDelivery 找缺口 → LLM 文本返修 → deliverable_fallback 对仍缺失文件直接 fs_write（pickDeliverableContent 优先取匹配扩展名的围栏代码块）→ 判定前对失败 verify 按 plan.steps 原参重跑复验（恢复的追加复验记录进步骤输出）
+  - 启发式直通 SUCCESS 的三重阻断：降级/重规划、verify 断言失败（复验后仍失败）、文件交付物硬断言 FAIL
+  - planner 规则遵循有随机波动：同一任务 4 轮压测，fs_write/verify/todo 时有时无——兜底链比强 prompt 更可靠，两者都要
+  - run7 完整韧性链实证：news_search 上游瞬时故障 → retry → degrade reason → 缺口补搜补回 → 意图返修 → 文件兜底 → judge SUCCESS（96.1s）
+  - 压测交付物备份惯例：每轮 run 前把 data/workspace/ 旧交付物 mv 到 /tmp/opencode/runN-deliverable-backup.json，避免旧文件蒙混文件存在性断言
+  - 测试基线 219 绿
