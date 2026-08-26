@@ -282,3 +282,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 单元测试新增 45 项（7 文件），全量 unit 测试 68 项绿；purification/sandbox.test.js 3 个预存失败与本次无关
   - npm self-evolve@1.5.6 published；GitHub tag v1.5.6 pushed，Release 需手动通过 Web UI 创建
 
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.10 尾部慢蒸馏修复）
+- Context: 用户反馈 6 步新闻检索任务全部完成后「综合回答」阶段长时间无输出
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 根因：executor 在 deep/≥5 步时无条件进入蒸馏分支，而 distillSteps 内部后备阈值仅 12K；6 步 × full≤4000 字符 ≈ 12-24K 恰好超线，在 final 前插入一次阻塞式 LLM 蒸馏调用（免费档排队+生成 10-40s）
+  - 修复：shouldDistill 纯函数（core/research.js）双条件门控——结构条件（deep 或 ≥5 步）且总量超 STEPS_DISTILL_MIN_CHARS（默认 26K）才蒸馏；config/index.js 读 SPA_STEPS_DISTILL_MIN_CHARS 环境变量/local.json 覆盖
+  - 阶段标签时序：「综合回答」progress 移到蒸馏块之后发出，界面顺序与真实执行一致
+  - 发布流程修正：npm 发布命令是 npm publish（直接发布，无 OTP）；「npm self-evolve」是误记，self-evolve 是包名本身
+  - 测试基线更新为 195 绿（191 + 4 个 shouldDistill 单测）
