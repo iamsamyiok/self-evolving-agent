@@ -216,3 +216,30 @@ Entries discovered by the Agent during task execution should follow this format:
   - 心跳停止点：429 分支停（rate_limit 事件接管）/流式分支到 headers 即停/非流式 json() 完成后停/catch 必停；MOCK 模式不走心跳
   - "输入框黑点"根因：⚡ emoji 在无 emoji 字体环境渲染成几个像素的深色小块——UI 控件图标一律用内联 SVG（fill=currentColor 跟随主题色），禁用 emoji 字符做控件图标
   - UI 验证环境：/tmp/opencode/uitest 装有 playwright-core + chromium-headless-shell（系统依赖已 apt 装齐），可 node shot.js 截图 + 像素扫描（自写 PNG 解码 scan.js）/ASCII 渲染（ascii.js）定位视觉缺陷；image_analysis MCP 余额不足时用像素扫描替代
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.5 吸收 dual-agent 内部智能体机制）
+- Context: 学习 iamsamyiok/dual-agent 内部智能体机制后全量吸收 9 项（批 1-4），npm self-evolve@1.5.5 发布
+- Category: Operations & Deployment
+- Instructions:
+  - dual-agent 仓库源码已克隆到 /tmp/opencode/dual-agent/，关键模块：lib/inner.js（上下文预算折叠 head300+tail100）、lib/plugins.js（插件运行时/锻造 overlay/mtime 热重载）、plugins/skill.js（SKILL.md frontmatter 解析+渐进披露）、plugins/subagent.js（并行子调研）、lib/intent.js（意图契约抽取+judge+≤2轮返修）——后续 Agent 开发时优先参考
+  - 本次新增核心文件：core/intent.js（B1 意图闭环）、core/archive.js（B2 BM25 历史任务检索）、core/fs-skills.js（C1 目录型 SKILL.md + C2 GitHub 一键安装）、core/subagent.js（D2 并行子调研工具 tool:subagent）
+  - tool-runtime.js call() 三重保护生效：超时兜底（SPA_TOOL_TIMEOUT_MS 默认 60s，含 Promise.race + clearTimeout 清理）/ 输出截断（OUTPUT_CAP=8192）/ 必填参数校验（requiredParams 声明走 _checkRequired，缺参报 err.blocked=true 带 schema 提示让 LLM 自修正）
+  - 锻造区 overlay：`<DATA_DIR>/tools-forged/` 覆盖同名内置 tools/；mtime 变更自动重载；restoreTool 删锻造版回归内置
+  - 连续失败止损：makeStallTracker(limit=3) —— 同工具 3 次失败且从未成功 → 后续步骤 skip 直接降级 reason 并注入"换路"提示
+  - 测试套件：`node --test tests/unit/*.test.js`，当前 68 项全绿（42 原有 + 26 新）
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.6 插件生态集成）
+- Context: 补齐 dual-agent 仓库中与本项目对齐的缺失插件（diff/probe/query/stat/todo/doc/verify/usage）
+- Category: Build Methods
+- Instructions:
+  - 新增 8 个零 token 工具：diff（unified diff）、probe（HTTP 冒烟）、query（JSON路径/CSV筛选）、stat（文件客观统计）、todo（workspace/.todo.json 持久化清单）、doc（txt/md/json/html/csv/log/pdf/docx/xlsx 零依赖解析）、verify（多规则批量断言，10种type）、usage（get/history/budget 三态查询）
+  - doc 工具 PDF 解析用线性扫文本流（UTF-16BE BOM + ISO-8859-1 PDF 映射表）；DOCX 解 ZIP 取 word/document.xml 中 <w:t> 标签；XLSX 解 ZIP 取 sharedStrings.xml + worksheet，.xls 二进制格式返回不支持提示
+  - verify 多规则一次调用：type 支持 exists/contains/regex/json_valid/min_length/max_length/eq/not_contains/file_exists/line_count
+  - query 工具源参数：source 既是 JSON 字符串也是文件路径（存在且不以 { 开头视为文件），where 子句用简单正则匹配 col op val（op ∈ ==/!=/>/< />=/>=/contains/like）
+  - todo 工作区持久化在 <workspace>/.todo.json，action 支持 list/add/toggle/clear/delete；跨轮状态由 TUI 和 web UI 共用同一文件
+  - tool-runtime.js 统一注册入口，planner 通过 tools.list() 动态获取完整工具列表，无需手动同步
+  - 单元测试新增 45 项（7 文件），全量 unit 测试 68 项绿；purification/sandbox.test.js 3 个预存失败与本次无关
+  - npm self-evolve@1.5.6 published；GitHub tag v1.5.6 pushed，Release 需手动通过 Web UI 创建
+
