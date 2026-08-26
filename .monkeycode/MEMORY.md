@@ -292,3 +292,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 阶段标签时序：「综合回答」progress 移到蒸馏块之后发出，界面顺序与真实执行一致
   - 发布流程修正：npm 发布命令是 npm publish（直接发布，无 OTP）；「npm self-evolve」是误记，self-evolve 是包名本身
   - 测试基线更新为 195 绿（191 + 4 个 shouldDistill 单测）
+
+[Project Knowledge Summary]
+- Date: 2026-08-26（v1.5.11 长程任务交付链修复）
+- Context: 用监控脚本压测复杂长程任务（深研+写文件+verify+stat），三轮迭代定位交付链缺陷
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 压测方法：/tmp/opencode/longtask-monitor.mjs 监控 NDJSON 事件流（阶段时序/重试/降级/大间隔/峰值内存），配合 tasks 表 plan 字段查 planner 实际参数
+  - degrade 无 retry 直接出现 = 红线拦截（checkStep 失败）；有 retry 再 degrade = 工具执行失败且参数修复救不回
+  - 根因族谱：planner 选 answer 伪动作写文件 / JSON 计划无数据流表达（自造 {{报告内容}} 占位符）/ 高危工具 use_reason 未教 / stat-doc 用 cwd 与 fs_write 的 workspace 路径体系分裂 / verify 缺数据源 throw
+  - 数据流解法：expandStepRefs（agent-executor.js 导出）——{{step:N}}/{{prev}}/{{steps_all}} 在红线检查前展开
+  - 修复验证基准：同一深研任务 189s FAIL（文件未写）→ 76s SUCCESS（verify 3/3，stat 真实统计）
