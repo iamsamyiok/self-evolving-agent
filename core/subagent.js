@@ -4,6 +4,7 @@
 // 纪律：≤3 个子课题；只读（news_search/http_get 白名单）；搜索失败降级知识综合并声明未核实；
 //       单子课题单轮搜索（无循环），成本上界 = n×(1 搜索 + 1 LLM)。
 import { chat } from './llm-adapter.js';
+import { parseSearchResults } from './research.js';
 
 const MAX_TOPICS = 3;
 
@@ -22,9 +23,13 @@ export function parseTopics(raw) {
 /** 单个子代理：搜索一次 → 综合结论（过程丢弃，只留结论与来源） */
 async function runOne(executor, topic, label) {
   let evidence = '';
+  let srcNote = '';
   try {
     const r = await executor.tools.call('news_search', { query: topic.slice(0, 60), maxResults: 6 }, { taskId: label });
     evidence = String(r.output ?? '').slice(0, 4000);
+    // 来源链接直出：取前两条带 URL 的检索结果附在结论尾部（前端 md 自动链接渲染为可点击来源）
+    const items = parseSearchResults(evidence).filter((i) => i.url).slice(0, 2);
+    if (items.length) srcNote = '\n\n来源：' + items.map((i) => `${i.title} ${i.url}`).join('；');
   } catch { /* 搜索失败降级知识综合 */ }
   const sys = '你是调研子代理。基于给定材料输出精炼结论：直接给事实与数字（≤300字），标注来源标题；材料不足处明确说"未找到可靠资料"，禁止编造。';
   const user = evidence
@@ -37,7 +42,7 @@ async function runOne(executor, topic, label) {
     ],
     temperature: 0.2, label,
   }).catch(() => null);
-  return { topic, conclusion: r?.text?.trim() || `（子课题「${topic}」调研失败）` };
+  return { topic, conclusion: (r?.text?.trim() || `（子课题「${topic}」调研失败）`) + srcNote };
 }
 
 /** 并行子调研入口（executor 注入到 ToolRuntime.subagentRunner） */

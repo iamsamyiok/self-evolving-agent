@@ -299,18 +299,29 @@ const state={convs:[],convId:null,sending:false,evoOpen:false,attachedImages:[],
 /* ── markdown-lite ── */
 function md(s){
   s=esc(s);
+  // 已生成的 HTML 块（图片/代码）先暂存占位符，避免其中 URL 被下面的自动链接误包
+  const slots=[];
+  const stash=(h)=>{slots.push(h);return '\u0000'+(slots.length-1)+'\u0000';};
   // 图片 URL 渲染（base64 或 http/https）
   s=s.replace(/(!\[[^\]]*\]\(([^)]+)\))|((https?:\/\/[^\s<>"']+\.(?:png|jpg|jpeg|gif|png|webp)(\?[^\s<>"']*)?))/g, (m, fullImg, alt, url) => {
     const src = url || alt;
     const altText = alt ? alt.replace(/[*_`]/g, '') : '图片';
-    return `<img src="${src}" alt="${altText}" style="max-width:100%;max-height:400px;border-radius:8px;margin:8px 0;border:1px solid var(--line)" loading="lazy">`;
+    return stash(`<img src="${src}" alt="${altText}" style="max-width:100%;max-height:400px;border-radius:8px;margin:8px 0;border:1px solid var(--line)" loading="lazy">`);
   });
-  s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<pre>'+c.replace(/\n$/,'')+'</pre>');
-  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  // markdown 链接 [文本](URL)：先于自动链接处理，渲染为文本可点的来源链接
+  s=s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,(m,txt,url)=>stash(`<a href="${url}" target="_blank" rel="noopener">${txt}</a>`));
+  s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>stash('<pre>'+c.replace(/\n$/,'')+'</pre>'));
+  s=s.replace(/`([^`\n]+)`/g,(m,c)=>stash('<code>'+c+'</code>'));
+  // 自动链接：正文裸 URL（含"链接：https://…"行）→ 可点击直达原始信息源（新标签打开；长链显示截断 href 保完整）
+  s=s.replace(/(https?:\/\/[^\s\u0000<>"']+)/g,(u)=>{
+    const disp=u.length>72?u.slice(0,69)+'…':u;
+    return `<a href="${u}" target="_blank" rel="noopener">${disp}</a>`;
+  });
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/^## (.+)$/gm,'<b style="font-size:15px">$1</b>');
   s=s.replace(/^### (.+)$/gm,'<b>$1</b>');
   s=s.replace(/^[-*] (.+)$/gm,'&bull; $1');
+  s=s.replace(/\u0000(\d+)\u0000/g,(_,i)=>slots[Number(i)]);
   s=s.replace(/\n/g,'<br>');
   return s;
 }

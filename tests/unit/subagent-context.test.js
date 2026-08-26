@@ -56,6 +56,22 @@ test('D2 runSubagents：MOCK 下并行返回各子课题结论；空 topics 报�
   CONFIG.MOCK = false;
 });
 
+test('D2 runSubagents：结论尾部附原始来源链接（可点击直达信息源）', async () => {
+  const { CONFIG } = await import('../../config/index.js');
+  CONFIG.MOCK = true;
+  const { runSubagents } = await import('../../core/subagent.js');
+  // 桩 executor：news_search 返回标准检索格式（含 URL）→ 结论尾部应附 来源：标题 URL
+  const searchOut = {
+    output: '1. 固态电池重大突破\n   来源：科技日报\n   链接：https://news.example.com/battery/1\n   摘要：能量密度提升\n\n2. 量产时间表\n   来源：路透社\n   链接：https://news.example.com/mass/2\n   摘要：2027 年',
+  };
+  const executor = { tools: { call: async () => searchOut } };
+  const out = await runSubagents(executor, { topics: '固态电池进展' }, 't2');
+  assert.match(out, /来源：/);
+  assert.match(out, /https:\/\/news\.example\.com\/battery\/1/, '结论须携带原始 URL');
+  assert.match(out, /https:\/\/news\.example\.com\/mass\/2/);
+  CONFIG.MOCK = false;
+});
+
 test('D2 工具注册面：subagent 进工具清单，参数校验生效', async () => {
   const { ToolRuntime } = await import('../../core/tool-runtime.js');
   const rt = new ToolRuntime(null, { workspace: join(tmpdir(), 'ws-d2') });
